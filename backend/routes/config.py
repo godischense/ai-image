@@ -38,7 +38,8 @@ def get_config():
                 'falApi': config_payload.get('fal_api', {}),
                 'gptsapiApi': config_payload.get('gptsapi_api', {}),
                 'fileUpload': config_payload.get('file_upload', {}),
-                'socialCopyApi': config_payload.get('social_copy_api', {})
+                'socialCopyApi': config_payload.get('social_copy_api', {}),
+                'topazGigapixel': config_payload.get('topaz_gigapixel', {})
             }
         }), 200
     except Exception as e:
@@ -87,6 +88,10 @@ def save_config():
             merge_and_save_db_config('social_copy_api', data['socialCopyApi'])
             logger.info('[ConfigAPI] social_copy_api 配置已保存')
 
+        if 'topazGigapixel' in data:
+            merge_and_save_db_config('topaz_gigapixel', data['topazGigapixel'])
+            logger.info('[ConfigAPI] topaz_gigapixel 配置已保存')
+
         update_app_config()
 
         return jsonify({
@@ -110,7 +115,8 @@ def get_single_config(config_type):
             'fal_api': 'fal_api',
             'gptsapi_api': 'gptsapi_api',
             'file_upload': 'file_upload',
-            'social_copy_api': 'social_copy_api'
+            'social_copy_api': 'social_copy_api',
+            'topaz_gigapixel': 'topaz_gigapixel'
         }
 
         if config_type not in config_type_map:
@@ -143,7 +149,8 @@ def save_single_config_api(config_type):
             'fal_api': 'fal_api',
             'gptsapi_api': 'gptsapi_api',
             'file_upload': 'file_upload',
-            'social_copy_api': 'social_copy_api'
+            'social_copy_api': 'social_copy_api',
+            'topaz_gigapixel': 'topaz_gigapixel'
         }
 
         if config_type not in config_type_map:
@@ -218,3 +225,9 @@ def update_app_config():
     current_app.config['SOCIAL_COPY_API_KEY'] = social_copy_api_config.get('apiKey', '')
     current_app.config['SOCIAL_COPY_MODEL'] = social_copy_api_config.get('model', '')
     current_app.config['SOCIAL_COPY_SYSTEM_PROMPT'] = social_copy_api_config.get('systemPrompt', '')
+
+    topaz_gigapixel_config = get_db_single_config('topaz_gigapixel')
+    current_app.config['TOPAZ_GIGAPIXEL_EXE_PATH'] = topaz_gigapixel_config.get('exePath', '')
+    current_app.config['TOPAZ_GIGAPIXEL_USE_SYSTEM_COMMAND'] = topaz_gigapixel_config.get('useSystemCommand', False)
+    current_app.config['TOPAZ_GIGAPIXEL_MAX_PARALLEL'] = topaz_gigapixel_config.get('maxParallel', 1)
+    current_app.config['TOPAZ_GIGAPIXEL_TIMEOUT'] = topaz_gigapixel_config.get('timeout', 600)

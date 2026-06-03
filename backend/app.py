@@ -61,6 +61,7 @@ from routes.image_proxy import image_proxy_bp
 from routes.file_upload import file_upload_bp
 from routes.preparation import preparation_bp
 from routes.copy_management import copy_management_bp
+from routes.gigapixel import gigapixel_bp
 
 app.register_blueprint(images_bp)
 app.register_blueprint(config_bp)
@@ -73,6 +74,7 @@ app.register_blueprint(image_proxy_bp)
 app.register_blueprint(file_upload_bp)
 app.register_blueprint(preparation_bp)
 app.register_blueprint(copy_management_bp)
+app.register_blueprint(gigapixel_bp)
 
 # 注册静态文件服务，将 generated_images 目录映射为 /api/static/generated_images
 # 项目根目录
@@ -116,6 +118,20 @@ if not os.path.exists(MATERIAL_THUMBNAIL_DIR):
 PREPARATION_DIR = os.path.join(project_root, '预备')
 if not os.path.exists(PREPARATION_DIR):
     os.makedirs(PREPARATION_DIR, exist_ok=True)
+
+# Topaz Gigapixel 输出目录（原图 + 缩略图）
+GIGAPIXEL_OUTPUT_DIR = os.path.join(project_root, 'gigapixel_output')
+if not os.path.exists(GIGAPIXEL_OUTPUT_DIR):
+    os.makedirs(GIGAPIXEL_OUTPUT_DIR, exist_ok=True)
+
+GIGAPIXEL_THUMBNAILS_DIR = os.path.join(project_root, 'gigapixel_thumbnails')
+if not os.path.exists(GIGAPIXEL_THUMBNAILS_DIR):
+    os.makedirs(GIGAPIXEL_THUMBNAILS_DIR, exist_ok=True)
+
+# Topaz Gigapixel per-task 临时输出子目录根
+GIGAPIXEL_TEMP_ROOT = os.path.join(project_root, 'gigapixel_temp')
+if not os.path.exists(GIGAPIXEL_TEMP_ROOT):
+    os.makedirs(GIGAPIXEL_TEMP_ROOT, exist_ok=True)
 
 
 @app.route('/api/static/generated_images/<path:filename>')
@@ -216,6 +232,28 @@ def serve_preparation_image(filename):
         将预备目录中的成品图片文件提供给前端访问。
     """
     return send_from_directory(PREPARATION_DIR, filename)
+
+
+@app.route('/api/static/gigapixel_output/<path:filename>')
+def serve_gigapixel_output(filename):
+    """
+    提供 Topaz Gigapixel 放大结果原图静态文件服务
+
+    功能描述：
+        将 gigapixel_output 目录中的放大原图提供给前端访问。
+    """
+    return send_from_directory(GIGAPIXEL_OUTPUT_DIR, filename)
+
+
+@app.route('/api/static/gigapixel_thumbnails/<path:filename>')
+def serve_gigapixel_thumbnail(filename):
+    """
+    提供 Topaz Gigapixel 放大结果缩略图静态文件服务
+
+    功能描述：
+        将 gigapixel_thumbnails 目录中的缩略图提供给前端访问。
+    """
+    return send_from_directory(GIGAPIXEL_THUMBNAILS_DIR, filename)
 
 
 @app.route('/api/edit-images/save', methods=['POST'])
@@ -433,6 +471,14 @@ def serve_spa_fallback(unknown_path):
 if __name__ == '__main__':
     from services.task_processor import start_task_processor
     from services.background_download_service import start_background_download_service
+    from services.gigapixel_task_service import start_gigapixel_task_service
     start_task_processor(app, max_retries=600)
     start_background_download_service(app, max_workers=2)
+    # 启动 Topaz Gigapixel AI 异步任务服务（并发数从配置读取，默认 1）
+    try:
+        _gigapixel_config = get_single_config('topaz_gigapixel') or {}
+        _max_parallel = int(_gigapixel_config.get('maxParallel', 1) or 1)
+    except Exception:
+        _max_parallel = 1
+    start_gigapixel_task_service(app, max_workers=_max_parallel)
     app.run(host='0.0.0.0', port=PORT, debug=True)

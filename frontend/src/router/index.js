@@ -35,6 +35,11 @@ const routes = [
     path: '/copy-management',
     name: 'CopyManagement',
     component: () => import('../views/CopyManagementView.vue')
+  },
+  {
+    path: '/gigapixel',
+    name: 'Gigapixel',
+    component: () => import('../views/GigapixelView.vue')
   }
 ];
 

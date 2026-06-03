@@ -307,6 +307,17 @@
   align-items: center;
 }
 
+// 两列并排布局（用于 Topaz Gigapixel 的并发数/超时等小字段）
+.config-card__field-row {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: $spacing-sm;
+}
+
+.config-card__field--half {
+  width: 100%;
+}
+
 .config-card__label--checkbox {
   display: flex;
   align-items: center;

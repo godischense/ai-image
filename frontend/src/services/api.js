@@ -110,6 +110,14 @@ function normalizeConfigPayload(payload = {}) {
     }
   }
 
+  if ('topazGigapixel' in rawConfig) {
+    result.topazGigapixel = normalizeSection(rawConfig.topazGigapixel);
+  }
+
+  if ('gigapixelDescVisibility' in rawConfig) {
+    result.gigapixelDescVisibility = normalizeSection(rawConfig.gigapixelDescVisibility);
+  }
+
   return result;
 }
 
@@ -370,4 +378,52 @@ export async function movePublishGroup(itemId, publishDate) {
 
 export async function compressPublishGroup(publishDate) {
   return api.post('/api/preparation/compress-publish-group', { publish_date: publishDate }, { timeout: 600000 });
+}
+
+// Topaz Gigapixel AI 异步放大相关 API
+// 检查本机 Topaz Gigapixel AI 是否可用（用于前端启动时探测）
+export async function checkGigapixelAvailable() {
+  return api.get('/api/gigapixel/check');
+}
+
+// 上传本地图片文件到服务器磁盘（multipart/form-data）
+// 返回：{ success, uploaded_path, preview_url, filename }
+export async function uploadGigapixelFile(file) {
+  const formData = new FormData()
+  formData.append('file', file)
+  // 使用原始 axios（不带 response.data 拦截器），因为需要完整响应
+  return axios.post('/api/gigapixel/upload', formData, {
+    headers: { 'Content-Type': 'multipart/form-data' },
+    timeout: 120000
+  }).then(r => r.data)
+}
+
+// 提交异步放大任务（返回 task_id，前端轮询）
+export async function submitGigapixelUpscale(payload) {
+  return api.post('/api/gigapixel/upscale', payload);
+}
+
+// 查询单个 gigapixel 任务状态
+export async function queryGigapixelTask(taskId) {
+  return api.get(`/api/gigapixel/task/${taskId}`);
+}
+
+// 列出所有 gigapixel 任务（可选 status 过滤）
+export async function listGigapixelTasks(status) {
+  return api.get('/api/gigapixel/tasks', { params: status ? { status } : {} });
+}
+
+// 列出所有已完成的 gigapixel 结果图
+export async function listGigapixelOutputs() {
+  return api.get('/api/gigapixel/outputs');
+}
+
+// 取消一个 gigapixel 任务（IN_PROGRESS 状态才能取消）
+export async function cancelGigapixelTask(taskId) {
+  return api.delete(`/api/gigapixel/task/${taskId}`);
+}
+
+// 查询后台 worker 队列状态
+export async function queryGigapixelQueue() {
+  return api.get('/api/gigapixel/queue');
 }

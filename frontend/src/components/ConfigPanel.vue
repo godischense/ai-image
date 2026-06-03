@@ -664,6 +664,127 @@
           </div>
         </form>
       </div>
+
+      <!-- Topaz Gigapixel AI 配置卡片 -->
+      <div class="config-card">
+        <div class="config-card__header">
+          <span class="config-card__icon">🔍</span>
+          <h4 class="config-card__title">Topaz Gigapixel AI</h4>
+          <span class="config-card__hint">本机商业软件，需已安装 Gigapixel AI ≥ 7.3.0</span>
+        </div>
+        <form class="config-card__form" @submit.prevent="handleSaveTopazGigapixel">
+          <div class="config-card__content">
+            <div class="config-card__field">
+              <label class="config-card__label" for="topazExePath">gigapixel.exe 路径</label>
+              <div class="config-card__input-wrapper">
+                <input
+                  id="topazExePath"
+                  v-model="topazGigapixelForm.exePath"
+                  :type="showTopazExePath ? 'text' : 'password'"
+                  class="config-card__input"
+                  placeholder="C:\Program Files\Topaz Labs LLC\Topaz Gigapixel AI\gigapixel.exe"
+                />
+                <button
+                  type="button"
+                  class="config-card__toggle-visibility"
+                  @click="showTopazExePath = !showTopazExePath"
+                >
+                  {{ showTopazExePath ? '🙈' : '👁️' }}
+                </button>
+              </div>
+              <span class="config-card__hint">使用系统命令（已加入 PATH）时可填 "gigapixel"，否则填完整路径</span>
+            </div>
+
+            <div class="config-card__field">
+              <label class="config-card__label">
+                <input
+                  v-model="topazGigapixelForm.useSystemCommand"
+                  type="checkbox"
+                  class="config-card__checkbox"
+                />
+                使用系统命令 "gigapixel"（需已配置 PATH）
+              </label>
+            </div>
+
+            <div class="config-card__field">
+              <label class="config-card__label" for="topazDefaultScale">默认缩放倍率</label>
+              <input
+                id="topazDefaultScale"
+                v-model.number="topazGigapixelForm.defaultScale"
+                type="number"
+                class="config-card__input"
+                placeholder="2.0"
+                min="1"
+                max="16"
+                step="0.1"
+              />
+            </div>
+
+            <div class="config-card__field">
+              <label class="config-card__label" for="topazDefaultModel">默认模型</label>
+              <input
+                id="topazDefaultModel"
+                v-model="topazGigapixelForm.defaultModel"
+                type="text"
+                class="config-card__input"
+                placeholder="Standard"
+                list="topaz-model-list"
+              />
+              <datalist id="topaz-model-list">
+                <option value="Art & CG" />
+                <option value="Lines" />
+                <option value="Very Compressed" />
+                <option value="High Fidelity" />
+                <option value="Low Resolution" />
+                <option value="Standard" />
+                <option value="Text & Shapes" />
+                <option value="Redefine" />
+                <option value="Recover" />
+              </datalist>
+            </div>
+
+            <div class="config-card__field-row">
+              <div class="config-card__field config-card__field--half">
+                <label class="config-card__label" for="topazMaxParallel">并发数</label>
+                <input
+                  id="topazMaxParallel"
+                  v-model.number="topazGigapixelForm.maxParallel"
+                  type="number"
+                  class="config-card__input"
+                  min="1"
+                  max="4"
+                />
+                <span class="config-card__hint">默认 1，Topaz 吃 GPU 资源</span>
+              </div>
+
+              <div class="config-card__field config-card__field--half">
+                <label class="config-card__label" for="topazTimeout">超时(秒)</label>
+                <input
+                  id="topazTimeout"
+                  v-model.number="topazGigapixelForm.timeout"
+                  type="number"
+                  class="config-card__input"
+                  min="60"
+                  max="3600"
+                />
+                <span class="config-card__hint">默认 600s，10 分钟</span>
+              </div>
+            </div>
+          </div>
+
+          <div class="config-card__actions">
+            <button type="submit" class="config-card__save-btn" :disabled="savingTopazGigapixel">
+              <span v-if="savingTopazGigapixel" class="config-card__spinner">⏳</span>
+              <span v-else>💾</span>
+              {{ savingTopazGigapixel ? '保存中...' : '保存配置' }}
+            </button>
+          </div>
+
+          <div v-if="topazGigapixelMessage" class="config-card__message" :class="[`config-card__message--${topazGigapixelMessageType}`]">
+            {{ topazGigapixelMessage }}
+          </div>
+        </form>
+      </div>
     </div>
   </div>
 </template>
@@ -745,6 +866,22 @@ const fileUploadForm = reactive({
   apiKey: ''
 });
 
+// Topaz Gigapixel AI 配置表单
+const topazGigapixelForm = reactive({
+  exePath: '',
+  useSystemCommand: false,
+  defaultScale: 2.0,
+  defaultModel: 'Standard',
+  defaultEnabled: true,
+  defaultSharpen: 0,
+  defaultDenoise: 0,
+  defaultCompression: 67,
+  defaultFr: 50,
+  defaultPreDownscaling: 75,
+  maxParallel: 1,
+  timeout: 600
+});
+
 const socialCopyApiForm = reactive({
   baseUrl: '',
   apiKey: '',
@@ -771,6 +908,10 @@ const fileUploadMessage = ref('');
 const fileUploadMessageType = ref('success');
 const showFileUploadApiKey = ref(false);
 const showSocialCopyApiKey = ref(false);
+const showTopazExePath = ref(false);
+const savingTopazGigapixel = ref(false);
+const topazGigapixelMessage = ref('');
+const topazGigapixelMessageType = ref('success');
 const savingSocialCopyApi = ref(false);
 const socialCopyApiMessage = ref('');
 const socialCopyApiMessageType = ref('success');
@@ -798,6 +939,7 @@ const loadAllConfigs = async () => {
     showMessage('gptsapiApi', '所有配置已加载', 'success');
     showMessage('fileUpload', '所有配置已加载', 'success');
     showMessage('socialCopyApi', '所有配置已加载', 'success');
+    showMessage('topazGigapixel', '所有配置已加载', 'success');
   } catch (error) {
     console.error('[ConfigPanel] loadAllConfigs - 加载配置失败:', error.message);
     syncFormsFromStore();
@@ -1065,6 +1207,36 @@ const handleSaveSocialCopyApi = async () => {
   }
 };
 
+const handleSaveTopazGigapixel = async () => {
+  // Topaz Gigapixel 表单无需严格校验：exe 路径在使用时会被 check 接口二次校验
+  savingTopazGigapixel.value = true;
+  topazGigapixelMessage.value = '';
+  try {
+    const configData = {
+      topazGigapixel: {
+        exePath: topazGigapixelForm.exePath,
+        useSystemCommand: topazGigapixelForm.useSystemCommand,
+        defaultScale: topazGigapixelForm.defaultScale,
+        defaultModel: topazGigapixelForm.defaultModel,
+        defaultEnabled: topazGigapixelForm.defaultEnabled,
+        defaultSharpen: topazGigapixelForm.defaultSharpen,
+        defaultDenoise: topazGigapixelForm.defaultDenoise,
+        defaultCompression: topazGigapixelForm.defaultCompression,
+        defaultFr: topazGigapixelForm.defaultFr,
+        defaultPreDownscaling: topazGigapixelForm.defaultPreDownscaling,
+        maxParallel: topazGigapixelForm.maxParallel,
+        timeout: topazGigapixelForm.timeout
+      }
+    };
+    await configStore.saveConfig(configData);
+    showMessage('topazGigapixel', 'Topaz Gigapixel 配置保存成功！修改后请手动重启后端以让并发数生效。', 'success');
+  } catch (error) {
+    showMessage('topazGigapixel', '保存 Topaz Gigapixel 配置失败: ' + error.message, 'error');
+  } finally {
+    savingTopazGigapixel.value = false;
+  }
+};
+
 const validateImageApiForm = () => {
   if (!imageApiForm.baseUrl) {
     showMessage('imageApi', '请输入图像API的Base URL', 'error');
@@ -1300,6 +1472,21 @@ const syncFormsFromStore = () => {
   socialCopyApiForm.model = configStore.socialCopyApi?.model || '';
   socialCopyApiForm.systemPrompt = configStore.socialCopyApi?.systemPrompt || '';
 
+  // Topaz Gigapixel 表单同步
+  const tg = configStore.topazGigapixel || {};
+  topazGigapixelForm.exePath = tg.exePath || '';
+  topazGigapixelForm.useSystemCommand = tg.useSystemCommand !== undefined ? !!tg.useSystemCommand : false;
+  topazGigapixelForm.defaultScale = tg.defaultScale !== undefined ? tg.defaultScale : 2.0;
+  topazGigapixelForm.defaultModel = tg.defaultModel || 'Standard';
+  topazGigapixelForm.defaultEnabled = tg.defaultEnabled !== undefined ? !!tg.defaultEnabled : true;
+  topazGigapixelForm.defaultSharpen = tg.defaultSharpen !== undefined ? tg.defaultSharpen : 0;
+  topazGigapixelForm.defaultDenoise = tg.defaultDenoise !== undefined ? tg.defaultDenoise : 0;
+  topazGigapixelForm.defaultCompression = tg.defaultCompression !== undefined ? tg.defaultCompression : 67;
+  topazGigapixelForm.defaultFr = tg.defaultFr !== undefined ? tg.defaultFr : 50;
+  topazGigapixelForm.defaultPreDownscaling = tg.defaultPreDownscaling !== undefined ? tg.defaultPreDownscaling : 75;
+  topazGigapixelForm.maxParallel = tg.maxParallel !== undefined ? tg.maxParallel : 1;
+  topazGigapixelForm.timeout = tg.timeout !== undefined ? tg.timeout : 600;
+
   console.log('[ConfigPanel] syncFormsFromStore - 表单同步完成:', {
     imageApi: { ...imageApiForm },
     server: { ...serverForm },
@@ -1345,6 +1532,10 @@ const showMessage = (type, text, messageType) => {
     socialCopyApiMessage.value = text;
     socialCopyApiMessageType.value = messageType;
     setTimeout(() => { socialCopyApiMessage.value = ''; }, 3000);
+  } else if (type === 'topazGigapixel') {
+    topazGigapixelMessage.value = text;
+    topazGigapixelMessageType.value = messageType;
+    setTimeout(() => { topazGigapixelMessage.value = ''; }, 3000);
   }
 };
 

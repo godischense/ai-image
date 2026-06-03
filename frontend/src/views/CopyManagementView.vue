@@ -1152,7 +1152,8 @@ refreshFileList()
               <div class="copy-management__file-info">
                 <div class="copy-management__file-name">{{ file.name }}</div>
                 <div class="copy-management__file-time">{{ file.modified_at.slice(0, 10) }}</div>
-                <div v-if="file.type === 'copy_board'" class="copy-management__file-type">原生卡片</div>
+                <div v-if="file.type === 'copy_board'" class="copy-management__file-type copy-management__file-type--board">原生卡片</div>
+                <div v-else-if="file.type === 'html'" class="copy-management__file-type copy-management__file-type--html">HTML海报</div>
               </div>
               <div v-if="file.type === 'copy_board'" class="copy-management__file-actions">
                 <button
@@ -1319,7 +1320,7 @@ refreshFileList()
           ref="iframeRef"
           class="copy-management__render-area"
           :srcdoc="htmlContent"
-          sandbox="allow-same-origin"
+          sandbox="allow-same-origin allow-scripts"
           @load="onIframeLoad"
         ></iframe>
 
@@ -1720,6 +1721,11 @@ refreshFileList()
   color: #047857;
   font-size: 10px;
   font-weight: 700;
+
+  &--html {
+    background: rgba(74, 158, 255, 0.12);
+    color: #2563eb;
+  }
 }
 
 .copy-management__main {

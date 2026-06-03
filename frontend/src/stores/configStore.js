@@ -56,6 +56,30 @@ const defaultConfig = {
     apiKey: '',
     model: '',
     systemPrompt: ''
+  },
+  topazGigapixel: {
+    exePath: 'C:\\Program Files\\Topaz Labs LLC\\Topaz Gigapixel AI\\gigapixel.exe',
+    useSystemCommand: false,
+    defaultScale: 2.0,
+    defaultModel: 'Standard',
+    defaultEnabled: true,
+    defaultSharpen: 0,
+    defaultDenoise: 0,
+    defaultCompression: 67,
+    defaultFr: 50,
+    defaultPreDownscaling: 75,
+    maxParallel: 1,
+    timeout: 600,
+    descriptionVisibility: {
+      intro: true,
+      scale: true,
+      model: true,
+      sharpen: true,
+      denoise: true,
+      compression: true,
+      fr: true,
+      pre_downscaling: true
+    }
   }
 };
 
@@ -176,6 +200,21 @@ export const useConfigStore = defineStore('config', {
       apiKey: defaultConfig.socialCopyApi.apiKey,
       model: defaultConfig.socialCopyApi.model,
       systemPrompt: defaultConfig.socialCopyApi.systemPrompt
+    },
+    topazGigapixel: {
+      exePath: defaultConfig.topazGigapixel.exePath,
+      useSystemCommand: defaultConfig.topazGigapixel.useSystemCommand,
+      defaultScale: defaultConfig.topazGigapixel.defaultScale,
+      defaultModel: defaultConfig.topazGigapixel.defaultModel,
+      defaultEnabled: defaultConfig.topazGigapixel.defaultEnabled,
+      defaultSharpen: defaultConfig.topazGigapixel.defaultSharpen,
+      defaultDenoise: defaultConfig.topazGigapixel.defaultDenoise,
+      defaultCompression: defaultConfig.topazGigapixel.defaultCompression,
+      defaultFr: defaultConfig.topazGigapixel.defaultFr,
+      defaultPreDownscaling: defaultConfig.topazGigapixel.defaultPreDownscaling,
+      maxParallel: defaultConfig.topazGigapixel.maxParallel,
+      timeout: defaultConfig.topazGigapixel.timeout,
+      descriptionVisibility: { ...defaultConfig.topazGigapixel.descriptionVisibility }
     },
     loading: false,
     error: null,
@@ -302,6 +341,29 @@ export const useConfigStore = defineStore('config', {
           this.socialCopyApi.systemPrompt = configData.socialCopyApi.systemPrompt !== undefined ? configData.socialCopyApi.systemPrompt : this.socialCopyApi.systemPrompt;
         }
 
+        if (configData.topazGigapixel) {
+          const tg = configData.topazGigapixel;
+          if (tg.exePath !== undefined) this.topazGigapixel.exePath = tg.exePath;
+          if (tg.useSystemCommand !== undefined) this.topazGigapixel.useSystemCommand = tg.useSystemCommand;
+          if (tg.defaultScale !== undefined) this.topazGigapixel.defaultScale = tg.defaultScale;
+          if (tg.defaultModel !== undefined) this.topazGigapixel.defaultModel = tg.defaultModel;
+          if (tg.defaultEnabled !== undefined) this.topazGigapixel.defaultEnabled = tg.defaultEnabled;
+          if (tg.defaultSharpen !== undefined) this.topazGigapixel.defaultSharpen = tg.defaultSharpen;
+          if (tg.defaultDenoise !== undefined) this.topazGigapixel.defaultDenoise = tg.defaultDenoise;
+          if (tg.defaultCompression !== undefined) this.topazGigapixel.defaultCompression = tg.defaultCompression;
+          if (tg.defaultFr !== undefined) this.topazGigapixel.defaultFr = tg.defaultFr;
+          if (tg.defaultPreDownscaling !== undefined) this.topazGigapixel.defaultPreDownscaling = tg.defaultPreDownscaling;
+          if (tg.maxParallel !== undefined) this.topazGigapixel.maxParallel = tg.maxParallel;
+          if (tg.timeout !== undefined) this.topazGigapixel.timeout = tg.timeout;
+          if (tg.descriptionVisibility !== undefined) {
+            this.topazGigapixel.descriptionVisibility = { ...this.topazGigapixel.descriptionVisibility, ...tg.descriptionVisibility };
+          }
+        }
+
+        if (configData.gigapixelDescVisibility) {
+          this.topazGigapixel.descriptionVisibility = { ...this.topazGigapixel.descriptionVisibility, ...configData.gigapixelDescVisibility };
+        }
+
         this.saveToStorage();
       } catch (err) {
         console.error('[ConfigStore] saveConfig - 保存配置失败:', err.message || err);
@@ -380,6 +442,29 @@ export const useConfigStore = defineStore('config', {
         if (configData.socialCopyApi.systemPrompt !== undefined) this.socialCopyApi.systemPrompt = configData.socialCopyApi.systemPrompt;
       }
 
+      if (configData.topazGigapixel) {
+        const tg = configData.topazGigapixel;
+        if (tg.exePath !== undefined) this.topazGigapixel.exePath = tg.exePath;
+        if (tg.useSystemCommand !== undefined) this.topazGigapixel.useSystemCommand = tg.useSystemCommand;
+        if (tg.defaultScale !== undefined) this.topazGigapixel.defaultScale = tg.defaultScale;
+        if (tg.defaultModel !== undefined) this.topazGigapixel.defaultModel = tg.defaultModel;
+        if (tg.defaultEnabled !== undefined) this.topazGigapixel.defaultEnabled = tg.defaultEnabled;
+        if (tg.defaultSharpen !== undefined) this.topazGigapixel.defaultSharpen = tg.defaultSharpen;
+        if (tg.defaultDenoise !== undefined) this.topazGigapixel.defaultDenoise = tg.defaultDenoise;
+        if (tg.defaultCompression !== undefined) this.topazGigapixel.defaultCompression = tg.defaultCompression;
+        if (tg.defaultFr !== undefined) this.topazGigapixel.defaultFr = tg.defaultFr;
+        if (tg.defaultPreDownscaling !== undefined) this.topazGigapixel.defaultPreDownscaling = tg.defaultPreDownscaling;
+        if (tg.maxParallel !== undefined) this.topazGigapixel.maxParallel = tg.maxParallel;
+        if (tg.timeout !== undefined) this.topazGigapixel.timeout = tg.timeout;
+        if (tg.descriptionVisibility !== undefined) {
+          this.topazGigapixel.descriptionVisibility = { ...this.topazGigapixel.descriptionVisibility, ...tg.descriptionVisibility };
+        }
+      }
+
+      if (configData.gigapixelDescVisibility) {
+        this.topazGigapixel.descriptionVisibility = { ...this.topazGigapixel.descriptionVisibility, ...configData.gigapixelDescVisibility };
+      }
+
       this.saveToStorage();
     },
 
@@ -422,6 +507,15 @@ export const useConfigStore = defineStore('config', {
         socialCopyApi: {
           ...defaultConfig.socialCopyApi,
           ...(configData?.socialCopyApi || {})
+        },
+        topazGigapixel: {
+          ...defaultConfig.topazGigapixel,
+          ...(configData?.topazGigapixel || {}),
+          descriptionVisibility: {
+            ...defaultConfig.topazGigapixel.descriptionVisibility,
+            ...(configData?.topazGigapixel?.descriptionVisibility || {}),
+            ...(configData?.gigapixelDescVisibility || {})
+          }
         }
       };
 
@@ -464,6 +558,19 @@ export const useConfigStore = defineStore('config', {
       this.socialCopyApi.apiKey = normalized.socialCopyApi.apiKey;
       this.socialCopyApi.model = normalized.socialCopyApi.model;
       this.socialCopyApi.systemPrompt = normalized.socialCopyApi.systemPrompt;
+      this.topazGigapixel.exePath = normalized.topazGigapixel.exePath || defaultConfig.topazGigapixel.exePath;
+      this.topazGigapixel.useSystemCommand = normalized.topazGigapixel.useSystemCommand !== undefined ? normalized.topazGigapixel.useSystemCommand : false;
+      this.topazGigapixel.defaultScale = normalized.topazGigapixel.defaultScale || defaultConfig.topazGigapixel.defaultScale;
+      this.topazGigapixel.defaultModel = normalized.topazGigapixel.defaultModel || defaultConfig.topazGigapixel.defaultModel;
+      this.topazGigapixel.defaultEnabled = normalized.topazGigapixel.defaultEnabled !== undefined ? normalized.topazGigapixel.defaultEnabled : true;
+      this.topazGigapixel.defaultSharpen = normalized.topazGigapixel.defaultSharpen !== undefined ? normalized.topazGigapixel.defaultSharpen : 0;
+      this.topazGigapixel.defaultDenoise = normalized.topazGigapixel.defaultDenoise !== undefined ? normalized.topazGigapixel.defaultDenoise : 0;
+      this.topazGigapixel.defaultCompression = normalized.topazGigapixel.defaultCompression !== undefined ? normalized.topazGigapixel.defaultCompression : 67;
+      this.topazGigapixel.defaultFr = normalized.topazGigapixel.defaultFr !== undefined ? normalized.topazGigapixel.defaultFr : 50;
+      this.topazGigapixel.defaultPreDownscaling = normalized.topazGigapixel.defaultPreDownscaling !== undefined ? normalized.topazGigapixel.defaultPreDownscaling : 75;
+      this.topazGigapixel.maxParallel = normalized.topazGigapixel.maxParallel !== undefined ? normalized.topazGigapixel.maxParallel : 1;
+      this.topazGigapixel.timeout = normalized.topazGigapixel.timeout !== undefined ? normalized.topazGigapixel.timeout : 600;
+      this.topazGigapixel.descriptionVisibility = { ...defaultConfig.topazGigapixel.descriptionVisibility, ...normalized.topazGigapixel.descriptionVisibility };
     },
 
     saveToStorage() {
@@ -514,6 +621,21 @@ export const useConfigStore = defineStore('config', {
           apiKey: this.socialCopyApi.apiKey,
           model: this.socialCopyApi.model,
           systemPrompt: this.socialCopyApi.systemPrompt
+        },
+        topazGigapixel: {
+          exePath: this.topazGigapixel.exePath,
+          useSystemCommand: this.topazGigapixel.useSystemCommand,
+          defaultScale: this.topazGigapixel.defaultScale,
+          defaultModel: this.topazGigapixel.defaultModel,
+          defaultEnabled: this.topazGigapixel.defaultEnabled,
+          defaultSharpen: this.topazGigapixel.defaultSharpen,
+          defaultDenoise: this.topazGigapixel.defaultDenoise,
+          defaultCompression: this.topazGigapixel.defaultCompression,
+          defaultFr: this.topazGigapixel.defaultFr,
+          defaultPreDownscaling: this.topazGigapixel.defaultPreDownscaling,
+          maxParallel: this.topazGigapixel.maxParallel,
+          timeout: this.topazGigapixel.timeout,
+          descriptionVisibility: { ...this.topazGigapixel.descriptionVisibility }
         }
       });
     }

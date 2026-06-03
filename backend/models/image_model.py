@@ -420,14 +420,13 @@ def add_image(
     conn = get_db_connection()
     cursor = conn.cursor()
 
-    # 自动根据模型名称判断 api_source
+    # 自动根据模型名称判断 api_source（仅在未显式传入或为默认 't8' 时覆盖）
     # openai/* 格式的模型为 fal 接口，gptsapi/* 为 GPTsAPI，其他为 T8。
-    if model and model.startswith('openai/'):
-        api_source = 'fal'
-    elif model and model.startswith('gptsapi/'):
-        api_source = 'gptsapi'
-    else:
-        api_source = 't8'
+    if api_source == 't8':
+        if model and model.startswith('openai/'):
+            api_source = 'fal'
+        elif model and model.startswith('gptsapi/'):
+            api_source = 'gptsapi'
 
     if not title and prompt:
         title = prompt[:6]

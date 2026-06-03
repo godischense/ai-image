@@ -20,7 +20,7 @@ from .database import get_db_connection
 
 logger = logging.getLogger(__name__)
 
-CONFIG_KEYS = ('image_api', 'server', 'prompt_optimize', 'fal_api', 'gptsapi_api', 'file_upload', 'social_copy_api')
+CONFIG_KEYS = ('image_api', 'server', 'prompt_optimize', 'fal_api', 'gptsapi_api', 'file_upload', 'social_copy_api', 'topaz_gigapixel')
 DEFAULT_CONFIGS = {
     'image_api': {
         'baseUrl': 'https://api.openai.com',
@@ -62,6 +62,27 @@ DEFAULT_CONFIGS = {
         'apiKey': '',
         'model': '',
         'systemPrompt': ''
+    },
+    'topaz_gigapixel': {
+        # Topaz Gigapixel AI 本地可执行文件路径（Windows）
+        'exePath': r'C:\Program Files\Topaz Labs LLC\Topaz Gigapixel AI\gigapixel.exe',
+        # 是否使用 'gigapixel' 系统命令（已加入 PATH），否则用完整 exe 路径
+        'useSystemCommand': False,
+        # 单图放大默认参数（与 ComfyUI-GigapixelAI 节点 GigapixelUpscaleSettings 字段一一对应）
+        # 重要：gigapixel.exe 命令行只有当参数 > 0 时才会真正传递；设为 0 等同于「不传该参数，使用 Topaz 内部默认」
+        'defaultScale': 2.0,
+        'defaultModel': 'Standard',
+        'defaultEnabled': True,
+        # 官方节点默认 sharpen=1 / denoise=1 / compression=67 / fr=50 / pre_downscaling=75
+        'defaultSharpen': 1,
+        'defaultDenoise': 1,
+        'defaultCompression': 67,
+        'defaultFr': 50,
+        'defaultPreDownscaling': 75,
+        # 后台 worker 并发数（Topaz 吃 GPU/CPU，默认 1 串行更稳）
+        'maxParallel': 1,
+        # 单图处理超时（秒）
+        'timeout': 600
     }
 }
 
@@ -200,5 +221,6 @@ def get_all_configs() -> Dict[str, Dict[str, Any]]:
         'fal_api': get_single_config('fal_api'),
         'gptsapi_api': get_single_config('gptsapi_api'),
         'file_upload': get_single_config('file_upload'),
-        'social_copy_api': get_single_config('social_copy_api')
+        'social_copy_api': get_single_config('social_copy_api'),
+        'topaz_gigapixel': get_single_config('topaz_gigapixel')
     }

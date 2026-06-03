@@ -165,6 +165,10 @@ class TaskProcessor:
     def _get_pending_tasks(self) -> List[Dict[str, Any]]:
         """
         获取所有 pending 状态的任务
+
+        实现逻辑：
+            排除 api_source='topaz_gigapixel' 的任务（该来源由 GigapixelTaskService 独立管理，
+            不需要远程轮询）。其它来源（t8/openai/fal/gptsapi/...）继续轮询。
         """
         conn = get_db_connection()
         cursor = conn.cursor()
@@ -174,7 +178,8 @@ class TaskProcessor:
             cursor.execute(f'''
                 SELECT * FROM tasks
                 WHERE status IN ({placeholders})
-            ''', tuple(PENDING_TASK_STATUSES))
+                  AND (api_source IS NULL OR api_source != ?)
+            ''', tuple(PENDING_TASK_STATUSES) + ('topaz_gigapixel',))
 
             rows = cursor.fetchall()
             result = []

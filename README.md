@@ -9,6 +9,7 @@
 
 - 🖼️ **AI 图像生成** — 集成 OpenAI 兼容接口、fal.ai (gpt-image-2)、GPTsAPI 等多种模型
 - ✏️ **AI 图像编辑** — 异步编辑、蒙版绘制、参考图上传、批量操作
+- 🔍 **Topaz Gigapixel AI 图片放大** — 调用本机 Topaz Gigapixel AI（≥7.3.0，需商业授权）对图片进行无损放大、降噪、锐化、压缩修复；9 种模型可选（Art & CG / Lines / Very Compressed / High Fidelity / Low Resolution / Standard / Text & Shapes / Redefine / Recover）
 - 📚 **图片库管理** — 文件夹分类、标签、批量编辑、回收站
 - 🎨 **素材库** — 上传/管理参考素材，自动生成缩略图
 - 📝 **文案协同** — 多国家营销文案管理，AI 辅助生成与对比
@@ -78,6 +79,7 @@ AI-image/
 - **Python 3.12+** （推荐使用 venv 或 conda）
 - **Node.js 18+** 与 **npm 9+**
 - **Windows 10/11**（项目为 Windows 优化，其他系统可能需要小调整）
+- **可选：Topaz Gigapixel AI ≥ 7.3.0**（商业授权，本地安装）— 启用「图片放大」功能时需要；可在 https://www.topazlabs.com/downloads 下载
 
 ### 1. 克隆仓库 / Clone
 

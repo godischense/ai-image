@@ -67,8 +67,12 @@ DocuGenius/
 
 # ---------- AI IDE 工作记录 ----------
 # .trae/rules/ 保留（项目工作规则）
-# .trae/documents/ 不入仓（临时规划文档）
+# 其他 .trae 子目录不入仓（临时规划/技能/规格文件）
 .trae/documents/
+.trae/plans/
+.trae/skills/
+.trae/specs/
+frontend/.trae/
 
 # ---------- 系统文件 ----------
 .DS_Store

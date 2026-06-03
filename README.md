@@ -82,7 +82,7 @@ AI-image/
 ### 1. 克隆仓库 / Clone
 
 ```bash
-git clone https://github.com/godchensense/ai-image.git
+git clone https://github.com/godischense/ai-image.git
 cd ai-image
 ```
 

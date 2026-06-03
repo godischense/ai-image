@@ -115,6 +115,73 @@ python app.py
 
 后端默认监听 `http://localhost:5678`。
 
+#### 🔬 使用 Conda 创建 Python 环境 / Using Conda
+
+如果你的系统中已安装 [Anaconda](https://www.anaconda.com/) 或 [Miniconda](https://docs.conda.io/en/latest/miniconda.html)，推荐使用 Conda 隔离项目依赖，避免污染全局 Python。
+
+```bash
+# 1. 创建指定版本的 Conda 虚拟环境（Python 3.12，与本项目嵌入式 env 同版本）
+conda create -n ai-image python=3.12 -y
+
+# 2. 激活环境
+# Windows (cmd / PowerShell)
+conda activate ai-image
+# Linux / macOS (bash / zsh)
+conda activate ai-image
+
+# 3. 升级 pip（conda 环境的 pip 版本可能偏旧）
+python -m pip install --upgrade pip
+
+# 4. 进入后端目录
+cd backend
+
+# 5. 安装项目依赖
+pip install -r requirements.txt
+
+# 6. 复制配置文件模板并填写真实配置
+# Windows
+copy config\image_api.json.example config\image_api.json
+copy config\fal_api.json.example config\fal_api.json
+copy config\gptsapi_api.json.example config\gptsapi_api.json
+copy config\file_upload.json.example config\file_upload.json
+copy config\server.json.example config\server.json
+# Linux / macOS
+cp config/image_api.json.example config/image_api.json
+cp config/fal_api.json.example config/fal_api.json
+cp config/gptsapi_api.json.example config/gptsapi_api.json
+cp config/file_upload.json.example config/file_upload.json
+cp config/server.json.example config/server.json
+
+# 7. 启动后端
+python app.py
+```
+
+**常用 Conda 命令速查 / Useful Conda Commands**
+
+| 操作 | 命令 |
+|------|------|
+| 查看所有环境 | `conda env list` |
+| 激活环境 | `conda activate ai-image` |
+| 退出当前环境 | `conda deactivate` |
+| 查看已安装包 | `conda list` |
+| 导出环境配置 | `conda env export > environment.yml` |
+| 从 yml 创建环境 | `conda env create -f environment.yml` |
+| 删除环境 | `conda env remove -n ai-image` |
+
+**遇到问题？/ Troubleshooting**
+
+- **Q: 激活时报 `CondaError: Run 'conda init' before 'conda activate'`**
+  - A: 先执行 `conda init powershell`（或 `conda init bash`），然后**重启终端**生效
+- **Q: pip 安装包时很慢**
+  - A: 切换国内镜像源：
+    ```bash
+    pip config set global.index-url https://pypi.tuna.tsinghua.edu.cn/simple
+    ```
+- **Q: 启动后端报 `ModuleNotFoundError: No module named 'flask'`**
+  - A: 确认终端前缀是 `(ai-image)`，且 `pip install -r requirements.txt` 已执行完成
+- **Q: 想把 Conda 环境也提交到仓库供协作者使用**
+  - A: 不推荐（环境体积大且与平台相关）。可改用 `requirements.txt` + 上述步骤重建
+
 ### 3. 前端启动 / Frontend Setup
 
 ```bash

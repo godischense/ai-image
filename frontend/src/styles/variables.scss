@@ -1,0 +1,113 @@
+$primary-color: #6366f1;
+$primary-hover: #4f46e5;
+$primary-light: #818cf8;
+$primary-dark: #4338ca;
+$primary-gradient-start: #6366f1;
+$primary-gradient-end: #8b5cf6;
+
+$secondary-color: #ec4899;
+$secondary-hover: #db2777;
+$secondary-light: #f472b6;
+$secondary-dark: #be185d;
+
+$success-color: #10b981;
+$success-hover: #059669;
+$warning-color: #f59e0b;
+$warning-hover: #d97706;
+$danger-color: #ef4444;
+$danger-hover: #dc2626;
+
+$color-primary: #6366f1;
+$color-primary-hover: #4f46e5;
+$color-primary-light: #818cf8;
+$color-primary-dark: #4338ca;
+
+$color-secondary: #ec4899;
+$color-secondary-hover: #db2777;
+
+$color-success: #10b981;
+$color-warning: #f59e0b;
+$color-danger: #ef4444;
+
+$color-bg: #f8fafc;
+$color-bg-secondary: #f1f5f9;
+$color-bg-tertiary: #e2e8f0;
+$color-bg-card: #ffffff;
+$color-bg-dark: #111827;
+
+$color-text-primary: #0f172a;
+$color-text-secondary: #475569;
+$color-text-tertiary: #94a3b8;
+$color-text-inverse: #ffffff;
+
+$color-border: #e2e8f0;
+$color-border-light: #f1f5f9;
+$color-border-focus: #6366f1;
+
+$font-family-base: 'Inter', -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+$font-family-heading: 'Poppins', $font-family-base;
+
+$font-size-xs: 0.75rem;
+$font-size-sm: 0.875rem;
+$font-size-base: 1rem;
+$font-size-lg: 1.125rem;
+$font-size-xl: 1.25rem;
+$font-size-2xl: 1.5rem;
+$font-size-3xl: 1.875rem;
+$font-size-4xl: 2.25rem;
+
+$font-weight-normal: 400;
+$font-weight-medium: 500;
+$font-weight-semibold: 600;
+$font-weight-bold: 700;
+
+$line-height-tight: 1.25;
+$line-height-normal: 1.5;
+$line-height-relaxed: 1.75;
+
+$spacing-xs: 0.25rem;
+$spacing-sm: 0.5rem;
+$spacing-md: 1rem;
+$spacing-lg: 1.5rem;
+$spacing-xl: 2rem;
+$spacing-2xl: 3rem;
+$spacing-3xl: 4rem;
+
+$radius-sm: 0.25rem;
+$radius-md: 0.5rem;
+$radius-lg: 0.75rem;
+$radius-xl: 1rem;
+$radius-full: 9999rem;
+
+$shadow-sm: 0 1px 2px 0 rgba(0, 0, 0, 0.05);
+$shadow-md: 0 4px 6px -1px rgba(0, 0, 0, 0.1), 0 2px 4px -1px rgba(0, 0, 0, 0.06);
+$shadow-lg: 0 10px 15px -3px rgba(0, 0, 0, 0.1), 0 4px 6px -2px rgba(0, 0, 0, 0.05);
+$shadow-xl: 0 20px 25px -5px rgba(0, 0, 0, 0.1), 0 10px 10px -5px rgba(0, 0, 0, 0.04);
+$shadow-inner: inset 0 2px 4px 0 rgba(0, 0, 0, 0.06);
+$shadow-none: none;
+
+$transition-fast: 150ms ease;
+$transition-normal: 250ms ease;
+$transition-slow: 350ms ease;
+
+$z-index-dropdown: 1000;
+$z-index-sticky: 1020;
+$z-index-fixed: 1030;
+$z-index-modal-backdrop: 1040;
+$z-index-modal: 1050;
+$z-index-popover: 1060;
+$z-index-tooltip: 1070;
+
+$bg-primary: $color-bg;
+$bg-secondary: $color-bg-secondary;
+$bg-tertiary: $color-bg-tertiary;
+$bg-dark: $color-bg-dark;
+
+$text-primary: $color-text-primary;
+$text-secondary: $color-text-secondary;
+$text-tertiary: $color-text-tertiary;
+$text-inverse: $color-text-inverse;
+
+$border-color: $color-border;
+$border-light: $color-border-light;
+$border-dark: #374151;

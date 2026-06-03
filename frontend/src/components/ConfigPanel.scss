@@ -1,0 +1,445 @@
+@use '../styles/variables' as *;
+@use '../styles/mixins' as *;
+
+.config-panel {
+  max-width: 1200px;
+  width: 95%;
+  margin: $spacing-lg auto;
+  padding: $spacing-lg;
+  background-color: $bg-primary;
+  border-radius: $radius-xl;
+  box-shadow: $shadow-md;
+
+  &__header {
+    @include flex-between;
+    gap: $spacing-md;
+    margin-bottom: $spacing-lg;
+  }
+
+  &__title {
+    margin: 0;
+    font-size: $font-size-xl;
+    font-weight: $font-weight-semibold;
+    color: $text-primary;
+  }
+
+  &__load-btn {
+    @include flex-center;
+    width: 32px;
+    height: 32px;
+    border: 1px solid $border-color;
+    border-radius: $radius-md;
+    background-color: $bg-secondary;
+    color: $text-primary;
+    cursor: pointer;
+    transition: transform $transition-fast, box-shadow $transition-fast, background-color $transition-fast;
+
+    &:hover {
+      background-color: $bg-tertiary;
+      transform: translateY(-1px);
+      box-shadow: $shadow-sm;
+    }
+
+    &:active {
+      transform: translateY(0);
+    }
+  }
+
+  &__cards {
+    display: grid;
+    grid-template-columns: repeat(2, 1fr);
+    gap: $spacing-md;
+  }
+}
+
+@media (max-width: 1200px) {
+  .config-panel {
+    &__cards {
+      grid-template-columns: 1fr;
+    }
+  }
+}
+
+.config-card {
+  display: flex;
+  flex-direction: column;
+  background: $bg-secondary;
+  border: 1px solid $border-light;
+  border-radius: $radius-lg;
+  box-shadow: $shadow-sm;
+  overflow: hidden;
+
+  &__header {
+    @include flex-start;
+    gap: $spacing-sm;
+    padding: $spacing-md $spacing-lg;
+    border-bottom: 1px solid $border-light;
+    background: linear-gradient(135deg, rgba($primary-color, 0.08), rgba($secondary-color, 0.06));
+  }
+
+  &__icon {
+    font-size: 1rem;
+    line-height: 1;
+  }
+
+  &__title {
+    margin: 0;
+    font-size: $font-size-base;
+    font-weight: $font-weight-semibold;
+    color: $text-primary;
+  }
+
+  &__form {
+    display: flex;
+    flex: 1;
+    flex-direction: column;
+  }
+
+  &__content {
+    display: flex;
+    flex: 1;
+    flex-direction: column;
+    gap: $spacing-sm;
+    padding: $spacing-md $spacing-lg;
+  }
+
+  &__field {
+    display: flex;
+    flex-direction: column;
+    gap: 2px;
+
+    &--with-action {
+      .config-card__input-group {
+        display: flex;
+        gap: $spacing-xs;
+      }
+
+      .config-card__input {
+        flex: 1;
+      }
+    }
+  }
+
+  &__label {
+    font-size: $font-size-xs;
+    font-weight: $font-weight-medium;
+    color: $text-secondary;
+  }
+
+  &__input-wrapper {
+    position: relative;
+  }
+
+  &__input {
+    width: 100%;
+    padding: 0.5rem 0.75rem;
+    border: 1px solid $border-color;
+    border-radius: $radius-md;
+    background-color: $bg-primary;
+    color: $text-primary;
+    font-size: $font-size-xs;
+    transition: border-color $transition-fast, box-shadow $transition-fast, background-color $transition-fast;
+
+    &:focus {
+      outline: none;
+      border-color: $primary-light;
+      box-shadow: 0 0 0 2px rgba($primary-color, 0.1);
+    }
+
+    &[readonly] {
+      background-color: $bg-tertiary;
+      color: $text-secondary;
+      cursor: default;
+    }
+  }
+
+  &__textarea {
+    min-height: 80px;
+    resize: vertical;
+    line-height: $line-height-normal;
+  }
+
+  &__toggle-visibility {
+    @include flex-center;
+    position: absolute;
+    top: 50%;
+    right: $spacing-xs;
+    width: 28px;
+    height: 28px;
+    padding: 0;
+    border: 0;
+    border-radius: $radius-sm;
+    background: transparent;
+    cursor: pointer;
+    transform: translateY(-50%);
+    transition: background-color $transition-fast, opacity $transition-fast;
+
+    &:hover {
+      background-color: rgba($primary-color, 0.08);
+    }
+  }
+
+  &__action-btn {
+    @include flex-center;
+    flex-shrink: 0;
+    width: 36px;
+    height: 34px;
+    padding: 0;
+    border: 1px solid $border-color;
+    border-radius: $radius-md;
+    background: $bg-primary;
+    color: $text-secondary;
+    font-size: 0.875rem;
+    cursor: pointer;
+    transition: all $transition-fast;
+
+    &:hover {
+      background: $bg-secondary;
+      border-color: $primary-light;
+      color: $primary-color;
+    }
+  }
+
+  &__hint {
+    font-size: 11px;
+    color: $text-tertiary;
+    line-height: $line-height-normal;
+  }
+
+  &__actions {
+    padding: 0 $spacing-lg $spacing-md;
+  }
+
+  &__save-btn {
+    @include flex-center;
+    gap: $spacing-xs;
+    width: 100%;
+    padding: 0.625rem 1rem;
+    border: 0;
+    border-radius: $radius-md;
+    background-color: $primary-color;
+    color: $text-inverse;
+    font-size: $font-size-xs;
+    font-weight: $font-weight-semibold;
+    cursor: pointer;
+    transition: transform $transition-fast, box-shadow $transition-fast, background-color $transition-fast;
+
+    &:hover:not(:disabled) {
+      background-color: $primary-hover;
+      transform: translateY(-1px);
+      box-shadow: $shadow-md;
+    }
+
+    &:active:not(:disabled) {
+      transform: translateY(0);
+    }
+
+    &:disabled {
+      opacity: 0.6;
+      cursor: not-allowed;
+    }
+  }
+
+  &__spinner {
+    display: inline-flex;
+    animation: spin 1s linear infinite;
+  }
+
+  &__message {
+    margin: 0 $spacing-lg $spacing-md;
+    padding: $spacing-xs $spacing-sm;
+    border-radius: $radius-md;
+    font-size: $font-size-xs;
+    text-align: center;
+    animation: slideDown $transition-normal forwards;
+
+    &--success {
+      background-color: rgba($success-color, 0.1);
+      color: $success-hover;
+    }
+
+    &--error {
+      background-color: rgba($danger-color, 0.1);
+      color: $danger-hover;
+    }
+
+    &--info {
+      background-color: rgba($primary-color, 0.1);
+      color: $primary-color;
+    }
+  }
+}
+
+@include respond-to-max('md') {
+  .config-panel {
+    padding: $spacing-md;
+
+    &__header {
+      align-items: flex-start;
+    }
+  }
+}
+
+@keyframes spin {
+  from {
+    transform: rotate(0deg);
+  }
+
+  to {
+    transform: rotate(360deg);
+  }
+}
+
+@keyframes slideDown {
+  from {
+    opacity: 0;
+    transform: translateY(-10px);
+  }
+
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
+}
+
+.config-card__field--checkbox {
+  display: flex;
+  align-items: center;
+}
+
+.config-card__label--checkbox {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  cursor: pointer;
+  font-size: $font-size-xs;
+  font-weight: 500;
+  color: $text-secondary;
+}
+
+.config-card__checkbox {
+  width: 14px;
+  height: 14px;
+  accent-color: #6366f1;
+  cursor: pointer;
+}
+
+.config-card__tab-group {
+  display: flex;
+  gap: 0;
+  border: 1px solid $border-color;
+  border-radius: $radius-md;
+  overflow: hidden;
+}
+
+.config-card__tab {
+  flex: 1;
+  padding: 0.5rem 0.75rem;
+  border: none;
+  background: $bg-primary;
+  color: $text-secondary;
+  font-size: $font-size-xs;
+  font-weight: $font-weight-medium;
+  cursor: pointer;
+  transition: all $transition-fast;
+
+  &:hover:not(.config-card__tab--active) {
+    background: $bg-secondary;
+  }
+
+  &--active {
+    background: $primary-color;
+    color: white;
+  }
+}
+
+.config-card__tab-hint {
+  margin-top: 2px;
+  font-size: 11px;
+  color: $text-tertiary;
+}
+
+// 系统提示词选择器样式
+.system-prompts-container {
+  display: flex;
+  flex-direction: column;
+  gap: $spacing-sm;
+}
+
+.system-prompts-selector {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.system-prompt-item {
+  padding: 8px 10px;
+  border: 1px solid $border-color;
+  border-radius: $radius-md;
+  background-color: $bg-primary;
+  cursor: pointer;
+  transition: all $transition-fast;
+  
+  &:hover {
+    border-color: $primary-light;
+    background-color: rgba($primary-color, 0.04);
+  }
+  
+  &.active {
+    border-color: $primary-color;
+    background-color: rgba($primary-color, 0.1);
+  }
+}
+
+.system-prompt-header {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+}
+
+.system-prompt-name {
+  font-size: $font-size-xs;
+  font-weight: $font-weight-medium;
+  color: $text-primary;
+}
+
+.system-prompt-actions {
+  display: flex;
+  gap: 4px;
+}
+
+.system-prompt-action-btn {
+  width: 24px;
+  height: 24px;
+  border: none;
+  background: transparent;
+  font-size: 12px;
+  cursor: pointer;
+  border-radius: 4px;
+  transition: background-color $transition-fast;
+  
+  &:hover {
+    background-color: rgba($primary-color, 0.1);
+  }
+}
+
+.add-system-prompt-btn {
+  padding: 8px 12px;
+  border: 1px dashed $border-color;
+  border-radius: $radius-md;
+  background-color: transparent;
+  color: $text-secondary;
+  font-size: $font-size-xs;
+  cursor: pointer;
+  transition: all $transition-fast;
+  
+  &:hover {
+    border-color: $primary-light;
+    color: $primary-color;
+    background-color: rgba($primary-color, 0.04);
+  }
+}
+
+.current-system-prompt {
+  width: 100%;
+}

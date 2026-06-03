@@ -1,0 +1,196 @@
+@use 'sass:color';
+@import '@/styles/mixins';
+
+.image-upload {
+  position: relative;
+  width: 100%;
+  min-height: 200px;
+  border: 2px dashed $border-color;
+  border-radius: $radius-lg;
+  background-color: $bg-secondary;
+  transition: all $transition-fast;
+  overflow: hidden;
+
+  &:hover:not(.image-upload--disabled) {
+    border-color: $primary-color;
+    background-color: rgba($primary-color, 0.05);
+  }
+
+  &--dragging {
+    border-color: $primary-color;
+    background-color: rgba($primary-color, 0.1);
+    transform: scale(1.01);
+  }
+
+  &--disabled {
+    opacity: 0.6;
+    cursor: not-allowed;
+
+    .image-upload__placeholder {
+      cursor: not-allowed;
+    }
+  }
+
+  &--has-image {
+    min-height: auto;
+    border-style: solid;
+    border-color: $border-color;
+  }
+
+  &--uploading {
+    min-height: 200px;
+    border-style: dashed;
+    border-color: $primary-color;
+    background-color: rgba($primary-color, 0.05);
+  }
+
+  &__input {
+    position: absolute;
+    width: 0;
+    height: 0;
+    opacity: 0;
+    pointer-events: none;
+  }
+
+  &__placeholder {
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    justify-content: center;
+    padding: $spacing-xl;
+    cursor: pointer;
+    min-height: 200px;
+  }
+
+  &__icon {
+    color: $text-secondary;
+    margin-bottom: $spacing-md;
+    transition: color $transition-fast;
+
+    .image-upload:hover:not(.image-upload--disabled) & {
+      color: $primary-color;
+    }
+  }
+
+  &__text {
+    font-size: $font-size-base;
+    color: $text-primary;
+    margin: 0 0 $spacing-xs;
+  }
+
+  &__hint {
+    font-size: $font-size-sm;
+    color: $text-secondary;
+    margin: 0;
+  }
+
+  &__preview {
+    position: relative;
+    width: 100%;
+  }
+
+  &__image {
+    display: block;
+    width: 100%;
+    height: auto;
+    max-height: 400px;
+    object-fit: contain;
+  }
+
+  &__overlay {
+    position: absolute;
+    top: 0;
+    left: 0;
+    right: 0;
+    bottom: 0;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    gap: $spacing-md;
+    background-color: rgba(0, 0, 0, 0.6);
+    opacity: 0;
+    transition: opacity $transition-fast;
+
+    .image-upload:hover:not(.image-upload--disabled) & {
+      opacity: 1;
+    }
+  }
+
+  &__replace-btn,
+  &__remove-btn {
+    padding: $spacing-sm $spacing-lg;
+    font-size: $font-size-sm;
+    font-weight: $font-weight-medium;
+    border-radius: $radius-md;
+    cursor: pointer;
+    transition: all $transition-fast;
+    border: none;
+  }
+
+  &__replace-btn {
+    background-color: $primary-color;
+    color: $text-inverse;
+
+    &:hover {
+      background-color: $primary-hover;
+      transform: translateY(-1px);
+    }
+  }
+
+  &__remove-btn {
+    background-color: transparent;
+    color: $text-inverse;
+    border: 1px solid rgba(255, 255, 255, 0.5);
+
+    &:hover {
+      background-color: rgba(255, 255, 255, 0.1);
+      border-color: $text-inverse;
+    }
+  }
+
+  &__progress {
+    position: absolute;
+    bottom: 0;
+    left: 0;
+    right: 0;
+    height: 4px;
+    background-color: rgba(0, 0, 0, 0.3);
+  }
+
+  &__progress-bar {
+    height: 100%;
+    background-color: $primary-color;
+    transition: width $transition-fast;
+  }
+
+  &__uploading {
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    justify-content: center;
+    padding: $spacing-xl;
+    min-height: 200px;
+  }
+
+  &__spinner {
+    width: 40px;
+    height: 40px;
+    border: 3px solid rgba($primary-color, 0.2);
+    border-top-color: $primary-color;
+    border-radius: 50%;
+    animation: spin 1s linear infinite;
+    margin-bottom: $spacing-md;
+  }
+
+  &__uploading-text {
+    font-size: $font-size-sm;
+    color: $text-secondary;
+    margin: 0;
+  }
+}
+
+@keyframes spin {
+  to {
+    transform: rotate(360deg);
+  }
+}

@@ -1,0 +1,451 @@
+.edit-view {
+  height: 100vh;
+  display: flex;
+  flex-direction: column;
+  background: $color-bg;
+
+  &__header {
+    display: flex;
+    align-items: center;
+    gap: $spacing-md;
+    padding: $spacing-md $spacing-lg;
+    background: $color-bg-secondary;
+    border-bottom: 1px solid $color-border;
+  }
+
+  &__back-btn {
+    display: flex;
+    align-items: center;
+    gap: $spacing-xs;
+    padding: $spacing-sm $spacing-md;
+    background: $color-bg;
+    border: 1px solid $color-border;
+    border-radius: $radius-md;
+    color: $color-text-primary;
+    font-size: $font-size-sm;
+    cursor: pointer;
+    transition: all $transition-fast;
+
+    &:hover {
+      background: $color-bg-tertiary;
+      border-color: $color-primary;
+      color: $color-primary;
+    }
+
+    svg {
+      width: 16px;
+      height: 16px;
+    }
+  }
+
+  &__title {
+    font-size: $font-size-lg;
+    font-weight: $font-weight-semibold;
+    color: $color-text-primary;
+    margin: 0;
+  }
+
+  &__content {
+    flex: 1;
+    display: flex;
+    overflow: hidden;
+  }
+
+  &__canvas {
+    flex: 1;
+    padding: $spacing-lg;
+    overflow-x: auto;
+    overflow-y: auto;
+    background: $color-bg-secondary;
+  }
+
+  &__tree {
+    position: relative;
+    padding-bottom: $spacing-md;
+    min-width: max-content;
+  }
+
+  &__tree-canvas {
+    position: relative;
+    min-width: 100%;
+  }
+
+  &__tree-lines {
+    position: absolute;
+    inset: 0;
+    overflow: visible;
+    pointer-events: none;
+  }
+
+  &__tree-line {
+    fill: none;
+    stroke: rgba($color-text-tertiary, 0.9);
+    stroke-width: 2;
+    stroke-linecap: round;
+  }
+
+  &__node {
+    position: absolute;
+    width: 104px;
+    transition: transform $transition-fast;
+    overflow: visible;
+  }
+
+  &__image-area {
+    flex: 1;
+    position: relative;
+    @include flex-center;
+    padding: $spacing-lg;
+    background: $color-bg-secondary;
+  }
+
+  &__image {
+    max-width: 100%;
+    max-height: 100%;
+    object-fit: contain;
+    border-radius: $radius-lg;
+    box-shadow: $shadow-lg;
+  }
+
+  &__no-image {
+    color: $color-text-secondary;
+    font-size: $font-size-lg;
+  }
+
+  &__editor-wrapper {
+    width: 420px;
+    padding: $spacing-lg;
+    background: $color-bg;
+    border-left: 1px solid $color-border;
+    overflow-y: auto;
+  }
+
+  &__loading {
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    justify-content: center;
+    padding: $spacing-xl;
+  }
+
+  &__spinner {
+    width: 48px;
+    height: 48px;
+    border: 4px solid $color-border;
+    border-top-color: $color-primary;
+    border-radius: 50%;
+    animation: spin 1s linear infinite;
+    margin-bottom: $spacing-md;
+  }
+
+  &__loading-text {
+    font-size: $font-size-base;
+    color: $color-text-secondary;
+  }
+
+  &__refreshing {
+    padding: $spacing-sm $spacing-md;
+    background: rgba($color-primary, 0.1);
+    border-radius: $radius-sm;
+    color: $color-primary;
+    font-size: $font-size-sm;
+    text-align: center;
+    margin-bottom: $spacing-md;
+  }
+
+  // 参考图上传区域
+  &__reference-header {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    margin-bottom: $spacing-sm;
+  }
+
+  &__reference-actions {
+    display: flex;
+    align-items: center;
+    gap: $spacing-sm;
+  }
+
+  &__reference-action-btn {
+    display: flex;
+    align-items: center;
+    gap: $spacing-xs;
+    padding: $spacing-xs $spacing-sm;
+    background: linear-gradient(135deg, rgba($primary-color, 0.1) 0%, rgba($primary-color, 0.05) 100%);
+    border: 1px solid rgba($primary-color, 0.2);
+    border-radius: $radius-md;
+    color: $primary-color;
+    font-size: 11px;
+    font-weight: 500;
+    cursor: pointer;
+    transition: all $transition-fast;
+
+    &:hover {
+      background: linear-gradient(135deg, rgba($primary-color, 0.15) 0%, rgba($primary-color, 0.1) 100%);
+      border-color: rgba($primary-color, 0.3);
+      transform: translateY(-1px);
+    }
+
+    svg {
+      width: 12px;
+      height: 12px;
+    }
+  }
+
+  &__reference-count {
+    font-size: 10px;
+    color: $color-text-tertiary;
+    background: $color-bg-secondary;
+    padding: 2px 8px;
+    border-radius: $radius-full;
+  }
+
+  &__reference {
+    display: flex;
+    flex-direction: column;
+    gap: $spacing-sm;
+  }
+
+  &__reference-dropzone {
+    position: relative;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    justify-content: center;
+    gap: $spacing-xs;
+    padding: $spacing-lg $spacing-xl;
+    background: linear-gradient(180deg, $color-bg-secondary 0%, $color-bg-tertiary 100%);
+    border: 2px dashed $color-border;
+    border-radius: $radius-xl;
+    cursor: pointer;
+    transition: all $transition-fast;
+
+    &:hover {
+      border-color: $primary-color;
+      background: linear-gradient(180deg, rgba($primary-color, 0.05) 0%, rgba($primary-color, 0.03) 100%);
+    }
+
+    &--dragover {
+      border-color: $primary-color;
+      background: linear-gradient(180deg, rgba($primary-color, 0.1) 0%, rgba($primary-color, 0.05) 100%);
+    }
+  }
+
+  &__reference-icon-wrapper {
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    width: 42px;
+    height: 42px;
+    background: $color-bg-card;
+    border-radius: $radius-xl;
+    box-shadow: 0 4px 12px rgba(0, 0, 0, 0.06);
+  }
+
+  &__reference-icon {
+    width: 18px;
+    height: 18px;
+    color: $primary-color;
+  }
+
+  &__reference-text {
+    font-size: 11px;
+    font-weight: 500;
+    color: $color-text-primary;
+  }
+
+  &__reference-hint {
+    font-size: 9px;
+    color: $color-text-tertiary;
+  }
+
+  &__reference-input {
+    position: absolute;
+    width: 0;
+    height: 0;
+    opacity: 0;
+    pointer-events: none;
+  }
+
+  &__reference-grid {
+    display: grid;
+    grid-template-columns: repeat(4, 1fr);
+    gap: $spacing-sm;
+  }
+
+  &__reference-item {
+    position: relative;
+    aspect-ratio: 1;
+    border-radius: $radius-lg;
+    overflow: hidden;
+    cursor: pointer;
+    box-shadow: 0 2px 8px rgba(0, 0, 0, 0.06);
+    transition: all $transition-fast;
+
+    &:hover {
+      transform: scale(1.02);
+      box-shadow: 0 4px 16px rgba(0, 0, 0, 0.12);
+
+      .edit-view__reference-overlay {
+        opacity: 1;
+      }
+    }
+  }
+
+  &__reference-overlay {
+    position: absolute;
+    top: 0;
+    left: 0;
+    right: 0;
+    bottom: 0;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    gap: $spacing-xs;
+    background: linear-gradient(135deg, rgba(0, 0, 0, 0.7) 0%, rgba(0, 0, 0, 0.5) 100%);
+    opacity: 0;
+    transition: opacity $transition-fast;
+  }
+
+  &__reference-btn {
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    width: 28px;
+    height: 28px;
+    background: rgba(255, 255, 255, 0.15);
+    backdrop-filter: blur(4px);
+    border: none;
+    border-radius: $radius-md;
+    color: $color-text-inverse;
+    cursor: pointer;
+    transition: all $transition-fast;
+
+    &:hover {
+      background: rgba(255, 255, 255, 0.25);
+    }
+
+    svg {
+      width: 12px;
+      height: 12px;
+    }
+
+    &--danger:hover {
+      background: rgba($danger-color, 0.8);
+    }
+  }
+
+  &__reference-thumb {
+    width: 100%;
+    height: 100%;
+    object-fit: cover;
+  }
+
+  &__reference-uploading {
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    width: 100%;
+    height: 100%;
+    background: $color-bg-secondary;
+    color: $color-primary;
+
+    svg {
+      width: 24px;
+      height: 24px;
+      animation: spin 1s linear infinite;
+    }
+  }
+
+  &__reference-remove {
+    position: absolute;
+    top: 4px;
+    right: 4px;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    width: 20px;
+    height: 20px;
+    background: rgba(0, 0, 0, 0.6);
+    backdrop-filter: blur(4px);
+    border: none;
+    border-radius: $radius-sm;
+    color: #fff;
+    cursor: pointer;
+    transition: all $transition-fast;
+
+    &:hover {
+      background: rgba($danger-color, 0.8);
+    }
+
+    svg {
+      width: 10px;
+      height: 10px;
+    }
+  }
+
+  // 标注与遮罩预览缩略图
+  &__preview-masks {
+    display: flex;
+    gap: $spacing-sm;
+    padding-top: $spacing-sm;
+    border-top: 1px solid $color-border-light;
+  }
+
+  &__preview-mask-item {
+    position: relative;
+    width: 72px;
+    height: 72px;
+    border-radius: $radius-md;
+    overflow: hidden;
+    border: 1px solid $color-border;
+    cursor: pointer;
+    transition: all $transition-fast;
+
+    &:hover {
+      border-color: $color-primary;
+      transform: scale(1.04);
+    }
+
+    &--mask {
+      .edit-view__preview-mask-thumb {
+        filter: brightness(0.6) saturate(1.2);
+      }
+    }
+  }
+
+  &__preview-mask-label {
+    position: absolute;
+    top: 2px;
+    left: 2px;
+    z-index: 1;
+    padding: 1px 5px;
+    background: rgba(0, 0, 0, 0.55);
+    backdrop-filter: blur(4px);
+    border-radius: $radius-sm;
+    color: #fff;
+    font-size: 8px;
+    font-weight: 600;
+    letter-spacing: 0.03em;
+  }
+
+  &__preview-mask-thumb {
+    width: 100%;
+    height: 100%;
+    object-fit: cover;
+  }
+
+  &__preview-mask-overlay {
+    position: absolute;
+    inset: 0;
+    background: rgba(#ef4444, 0.15);
+    pointer-events: none;
+  }
+}
+
+@keyframes spin {
+  to {
+    transform: rotate(360deg);
+  }
+}

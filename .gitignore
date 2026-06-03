@@ -1,0 +1,87 @@
+# ============================================
+# AI-image 项目 .gitignore
+# 目标：只跟踪源代码与必要文档，排除一切运行时数据、个人文件、环境目录
+# ============================================
+
+# ---------- 运行环境 ----------
+# 嵌入式 Python 解释器（200MB+）
+env/
+# 本地 Node 运行时
+node-v24.15.0-win-x64/
+# 前端依赖
+frontend/node_modules/
+
+# ---------- Python 缓存 ----------
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+.Python
+*.egg-info/
+
+# ---------- 构建产物 ----------
+frontend/dist/
+www/
+*.log
+
+# ---------- 运行时数据（业务产出，非源码） ----------
+generated_images/
+generated_thumbnails/
+edit_folders/
+edit_thumbnails/
+素材/
+素材缩略图/
+预备/
+回收站/
+
+# ---------- 后端运行时 ----------
+backend/storage/*.db
+backend/storage/*.sqlite
+backend/storage/*.sqlite3
+backend/storage/*.json.backup
+backend/temp/
+
+# ---------- 配置文件（含敏感信息） ----------
+# 真实配置文件不入仓，使用 *.example 模板
+backend/config/image_api.json
+backend/config/fal_api.json
+backend/config/gptsapi_api.json
+backend/config/file_upload.json
+backend/config/server.json
+
+# ---------- 个人/无关文件 ----------
+简历-李金成.html
+简历-李金成.pdf
+转换pdf.py
+微信图片_*.jpg
+微信图片_*.png
+文案/
+DocuGenius/
+新建文件夹/
+
+# ---------- IDE 与开发工具 ----------
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# ---------- AI IDE 工作记录 ----------
+# .trae/rules/ 保留（项目工作规则）
+# .trae/documents/ 不入仓（临时规划文档）
+.trae/documents/
+
+# ---------- 系统文件 ----------
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# ---------- 环境变量 ----------
+.env
+.env.local
+.env.*.local
+
+# ---------- 日志与临时 ----------
+*.log
+*.tmp
+*.bak
+*.swp

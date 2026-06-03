@@ -1,0 +1,31 @@
+.create-view {
+  height: calc(100vh - 72px);
+  display: flex;
+  flex-direction: column;
+  background: linear-gradient(180deg, $color-bg-secondary 0%, $color-bg 100%);
+
+  &__content {
+    flex: 1;
+    display: flex;
+    overflow: hidden;
+    gap: $spacing-lg;
+    padding: $spacing-lg;
+  }
+
+  &__generator {
+    width: 440px;
+    flex-shrink: 0;
+    overflow-y: auto;
+  }
+
+  &__library {
+    flex: 1;
+    background: $color-bg-card;
+    border-radius: $radius-xl;
+    box-shadow: 0 4px 30px rgba(0, 0, 0, 0.06);
+    border: 1px solid rgba($color-border, 0.5);
+    overflow: hidden;
+    display: flex;
+    flex-direction: column;
+  }
+}

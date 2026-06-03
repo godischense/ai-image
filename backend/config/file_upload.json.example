@@ -1,0 +1,4 @@
+{
+  "baseUrl": "https://your-file-upload-host.com",
+  "apiKey": "请在此处填写文件上传服务 API Key"
+}

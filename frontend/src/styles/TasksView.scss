@@ -1,0 +1,24 @@
+.tasks-view {
+  height: 100vh;
+  display: flex;
+  flex-direction: column;
+  background: $color-bg;
+
+  &__header {
+    padding: $spacing-md $spacing-lg;
+    border-bottom: 1px solid $color-border;
+    background: #fff;
+  }
+
+  &__title {
+    font-size: $font-size-xl;
+    font-weight: 600;
+    color: $color-text-primary;
+  }
+
+  &__content {
+    flex: 1;
+    padding: $spacing-lg;
+    overflow-y: auto;
+  }
+}

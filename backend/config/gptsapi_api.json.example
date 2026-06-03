@@ -1,0 +1,4 @@
+{
+  "baseUrl": "https://api.gptsapi.net",
+  "apiKey": "请在此处填写你的 GPTsAPI Key"
+}

@@ -1,0 +1,9 @@
+{
+  "baseUrl": "https://api.openai.com",
+  "apiKey": "请在此处填写你的 OpenAI / 兼容接口 API Key",
+  "isAsync": false,
+  "imageModels": [
+    "gpt-image-2",
+    "dall-e-3"
+  ]
+}

@@ -1,0 +1,203 @@
+.image-preview {
+  &__backdrop {
+    @include fixed-fill;
+    @include flex-center;
+    background-color: rgba(0, 0, 0, 0.85);
+    z-index: $z-index-modal-backdrop;
+    animation: fadeIn $transition-fast forwards;
+  }
+
+  &__modal {
+    position: relative;
+    max-width: 90vw;
+    max-height: 90vh;
+    display: flex;
+    flex-direction: column;
+    background-color: $bg-primary;
+    border-radius: $radius-xl;
+    overflow: hidden;
+    box-shadow: $shadow-xl;
+    animation: scaleIn $transition-normal forwards;
+    z-index: $z-index-modal;
+  }
+
+  &__header {
+    @include flex-between;
+    padding: $spacing-md $spacing-lg;
+    background-color: $bg-secondary;
+    border-bottom: 1px solid $border-color;
+  }
+
+  &__title {
+    font-size: $font-size-lg;
+    font-weight: $font-weight-semibold;
+    color: $text-primary;
+    @include truncate;
+    max-width: 300px;
+  }
+
+  &__actions {
+    display: flex;
+    gap: $spacing-sm;
+  }
+
+  &__action-btn {
+    @include flex-center;
+    gap: $spacing-xs;
+    padding: $spacing-sm $spacing-md;
+    background-color: $bg-primary;
+    border: 1px solid $border-color;
+    border-radius: $radius-md;
+    color: $text-primary;
+    font-size: $font-size-sm;
+    font-weight: $font-weight-medium;
+    @include transition-base(all, $transition-fast);
+
+    &:hover {
+      background-color: $bg-tertiary;
+      border-color: $border-dark;
+    }
+
+    &--primary {
+      background-color: $primary-color;
+      border-color: $primary-color;
+      color: $text-inverse;
+
+      &:hover {
+        background-color: $primary-hover;
+        border-color: $primary-hover;
+      }
+    }
+
+    &:disabled {
+      opacity: 0.5;
+      cursor: not-allowed;
+    }
+  }
+
+  &__icon {
+    width: 16px;
+    height: 16px;
+  }
+
+  &__content {
+    flex: 1;
+    @include flex-center;
+    padding: $spacing-md;
+    overflow: hidden;
+    background-color: $bg-dark;
+  }
+
+  &__image-container {
+    position: relative;
+    max-width: 100%;
+    max-height: calc(90vh - 120px);
+    overflow: hidden;
+  }
+
+  &__image {
+    display: block;
+    max-width: 100%;
+    max-height: calc(90vh - 120px);
+    object-fit: contain;
+    border-radius: $radius-md;
+    animation: imageZoomIn $transition-normal forwards;
+  }
+
+  &__error {
+    @include flex-center;
+    min-width: 320px;
+    min-height: 240px;
+    max-width: 100%;
+    max-height: calc(90vh - 120px);
+    padding: $spacing-lg;
+    border: 1px dashed rgba($text-inverse, 0.2);
+    border-radius: $radius-md;
+    color: $text-inverse;
+    text-align: center;
+    line-height: 1.6;
+  }
+
+  &__close {
+    position: absolute;
+    top: $spacing-md;
+    right: $spacing-md;
+    @include flex-center;
+    width: 36px;
+    height: 36px;
+    background-color: rgba(0, 0, 0, 0.6);
+    backdrop-filter: blur(4px);
+    border-radius: $radius-full;
+    color: $text-inverse;
+    @include transition-base(background-color, $transition-fast);
+
+    &:hover {
+      background-color: rgba(0, 0, 0, 0.8);
+    }
+  }
+
+  &__close-icon {
+    width: 20px;
+    height: 20px;
+  }
+
+  &__info {
+    padding: $spacing-md $spacing-lg;
+    background-color: $bg-secondary;
+    border-top: 1px solid $border-color;
+  }
+
+  &__meta {
+    display: flex;
+    gap: $spacing-lg;
+    flex-wrap: wrap;
+  }
+
+  &__meta-item {
+    display: flex;
+    align-items: center;
+    gap: $spacing-xs;
+    font-size: $font-size-sm;
+    color: $text-secondary;
+  }
+
+  &__meta-icon {
+    width: 14px;
+    height: 14px;
+    opacity: 0.7;
+  }
+}
+
+@keyframes fadeIn {
+  from {
+    opacity: 0;
+  }
+
+  to {
+    opacity: 1;
+  }
+}
+
+@keyframes scaleIn {
+  from {
+    opacity: 0;
+    transform: scale(0.95);
+  }
+
+  to {
+    opacity: 1;
+    transform: scale(1);
+  }
+}
+
+@keyframes imageZoomIn {
+  from {
+    opacity: 0;
+    transform: scale(0.9);
+  }
+
+  to {
+    opacity: 1;
+    transform: scale(1);
+  }
+}

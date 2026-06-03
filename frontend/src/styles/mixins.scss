@@ -1,0 +1,147 @@
+@use "@/styles/variables" as *;
+
+@mixin respond-to($breakpoint) {
+  @if $breakpoint == 'xs' {
+    @media (min-width: 480px) { @content; }
+  } @else if $breakpoint == 'sm' {
+    @media (min-width: 640px) { @content; }
+  } @else if $breakpoint == 'md' {
+    @media (min-width: 768px) { @content; }
+  } @else if $breakpoint == 'lg' {
+    @media (min-width: 1024px) { @content; }
+  } @else if $breakpoint == 'xl' {
+    @media (min-width: 1280px) { @content; }
+  } @else if $breakpoint == '2xl' {
+    @media (min-width: 1536px) { @content; }
+  }
+}
+
+@mixin respond-to-max($breakpoint) {
+  @if $breakpoint == 'xs' {
+    @media (max-width: 479px) { @content; }
+  } @else if $breakpoint == 'sm' {
+    @media (max-width: 639px) { @content; }
+  } @else if $breakpoint == 'md' {
+    @media (max-width: 767px) { @content; }
+  } @else if $breakpoint == 'lg' {
+    @media (max-width: 1023px) { @content; }
+  } @else if $breakpoint == 'xl' {
+    @media (max-width: 1279px) { @content; }
+  } @else if $breakpoint == '2xl' {
+    @media (max-width: 1535px) { @content; }
+  }
+}
+
+@mixin flex-center {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+
+@mixin flex-between {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+}
+
+@mixin flex-start {
+  display: flex;
+  align-items: center;
+  justify-content: flex-start;
+}
+
+@mixin flex-end {
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+}
+
+@mixin flex-column {
+  display: flex;
+  flex-direction: column;
+}
+
+@mixin flex-column-center {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+}
+
+@mixin flex-wrap($wrap: wrap) {
+  flex-wrap: $wrap;
+}
+
+@mixin text-ellipsis($lines: 1) {
+  @if $lines == 1 {
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  } @else {
+    display: -webkit-box;
+    -webkit-line-clamp: $lines;
+    -webkit-box-orient: vertical;
+    overflow: hidden;
+    text-overflow: ellipsis;
+  }
+}
+
+@mixin scrollbar-style($width: 6px, $track-bg: transparent, $thumb-bg: #d1d5db, $thumb-hover: #9ca3af) {
+  scrollbar-width: thin;
+  scrollbar-color: $thumb-bg $track-bg;
+
+  &::-webkit-scrollbar {
+    width: $width;
+    height: $width;
+  }
+
+  &::-webkit-scrollbar-track {
+    background: $track-bg;
+    border-radius: $radius-full;
+  }
+
+  &::-webkit-scrollbar-thumb {
+    background-color: $thumb-bg;
+    border-radius: $radius-full;
+    border: 2px solid $track-bg;
+
+    &:hover {
+      background-color: $thumb-hover;
+    }
+  }
+}
+
+@mixin transition-base($property: all, $duration: $transition-normal) {
+  transition: $property $duration;
+}
+
+@mixin hover-lift {
+  transition: transform $transition-fast, box-shadow $transition-fast;
+
+  &:hover {
+    transform: translateY(-2px);
+    box-shadow: $shadow-lg;
+  }
+}
+
+@mixin truncate {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+@mixin absolute-fill {
+  position: absolute;
+  top: 0;
+  left: 0;
+  right: 0;
+  bottom: 0;
+}
+
+@mixin fixed-fill {
+  position: fixed;
+  top: 0;
+  left: 0;
+  right: 0;
+  bottom: 0;
+}

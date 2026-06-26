@@ -32,6 +32,8 @@ class ImageItem:
     aspect_ratio: Optional[float] = None
     api_source: Optional[str] = None
     poster_copy: str = ''
+    # 制作人：仅作为本地图片元数据保存，不发送到生图 API
+    creator: str = ''
 
 
 PENDING_TASK_STATUSES = {
@@ -304,7 +306,8 @@ def _row_to_image_item(row) -> ImageItem:
         image_type=_get_row_value(row, 'image_type', 'generation') or 'generation',
         aspect_ratio=aspect_ratio,
         api_source=db_api_source,
-        poster_copy=_get_row_value(row, 'poster_copy', '') or ''
+        poster_copy=_get_row_value(row, 'poster_copy', '') or '',
+        creator=_get_row_value(row, 'creator', '') or ''
     )
 
 def _ensure_recycle_columns():
@@ -335,7 +338,7 @@ def _ensure_recycle_columns():
         conn.close()
 
 
-def load_images(image_type: Optional[str] = None) -> List[ImageItem]:
+def load_images(image_type: Optional[str] = None, creator: Optional[str] = None) -> List[ImageItem]:
     # 确保回收站相关字段存在
     _ensure_recycle_columns()
 
@@ -353,11 +356,15 @@ def load_images(image_type: Optional[str] = None) -> List[ImageItem]:
     '''
 
     params = []
+    conditions = ['images.is_deleted = 0']
     if image_type:
-        base_query += ' WHERE images.image_type = ? AND images.is_deleted = 0'
+        conditions.append('images.image_type = ?')
         params.append(image_type)
-    else:
-        base_query += ' WHERE images.is_deleted = 0'
+    if creator is not None:
+        conditions.append('images.creator = ?')
+        params.append(creator)
+
+    base_query += ' WHERE ' + ' AND '.join(conditions)
 
     base_query += ' ORDER BY images.created_at DESC'
     cursor.execute(base_query, params)
@@ -375,8 +382,8 @@ def save_images(images: List[ImageItem]) -> None:
             INSERT OR REPLACE INTO images (
                 id, url, thumbnail, prompt, model, size, quality,
                 created_at, task_id, local_path, thumbnail_path, title, updated_at,
-                parent_id, folder_path, image_type, poster_copy
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                parent_id, folder_path, image_type, poster_copy, creator
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         ''', (
             img.id,
             img.url,
@@ -394,9 +401,10 @@ def save_images(images: List[ImageItem]) -> None:
             img.parent_id,
             img.folder_path,
             img.image_type,
-            img.poster_copy
+            img.poster_copy,
+            img.creator or ''
         ))
-    
+
     conn.commit()
     conn.close()
 
@@ -415,18 +423,21 @@ def add_image(
     folder_path: Optional[str] = None,
     image_type: str = 'generation',
     api_source: str = 't8',
-    poster_copy: str = ''
+    poster_copy: str = '',
+    creator: str = ''
 ) -> ImageItem:
     conn = get_db_connection()
     cursor = conn.cursor()
 
     # 自动根据模型名称判断 api_source（仅在未显式传入或为默认 't8' 时覆盖）
-    # openai/* 格式的模型为 fal 接口，gptsapi/* 为 GPTsAPI，其他为 T8。
+    # openai/* 格式的模型为 fal 接口，gptsapi/* 为 GPTsAPI，apiyi/* 为 APIYI，其他为 T8。
     if api_source == 't8':
         if model and model.startswith('openai/'):
             api_source = 'fal'
         elif model and model.startswith('gptsapi/'):
             api_source = 'gptsapi'
+        elif model and model.startswith('apiyi/'):
+            api_source = 'apiyi'
 
     if not title and prompt:
         title = prompt[:6]
@@ -464,15 +475,16 @@ def add_image(
         image_type=image_type or 'generation',
         aspect_ratio=aspect_ratio,
         api_source=api_source,
-        poster_copy=poster_copy or ''
+        poster_copy=poster_copy or '',
+        creator=creator or ''
     )
 
     cursor.execute('''
         INSERT INTO images (
             id, url, thumbnail, prompt, model, size, quality,
             created_at, task_id, local_path, thumbnail_path, title, updated_at,
-            parent_id, folder_path, image_type, aspect_ratio, api_source, poster_copy
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            parent_id, folder_path, image_type, aspect_ratio, api_source, poster_copy, creator
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
     ''', (
         new_image.id,
         new_image.url,
@@ -492,12 +504,13 @@ def add_image(
         new_image.image_type,
         new_image.aspect_ratio,
         new_image.api_source,
-        new_image.poster_copy
+        new_image.poster_copy,
+        new_image.creator
     ))
-    
+
     conn.commit()
     conn.close()
-    
+
     return new_image
 
 def delete_image(image_id: str) -> tuple[bool, Optional[str]]:
@@ -576,10 +589,10 @@ def rename_image(image_id: str, new_title: str) -> tuple[bool, Optional[ImageIte
     
     return False, None, None
 
-def get_image_by_id(image_id: str) -> Optional[ImageItem]:
+def get_image_by_id(image_id: str, creator: Optional[str] = None) -> Optional[ImageItem]:
     conn = get_db_connection()
     cursor = conn.cursor()
-    cursor.execute('''
+    query = '''
         SELECT
             images.*,
             tasks.status AS task_status,
@@ -589,7 +602,12 @@ def get_image_by_id(image_id: str) -> Optional[ImageItem]:
         FROM images
         LEFT JOIN tasks ON tasks.id = images.task_id
         WHERE images.id = ?
-    ''', (image_id,))
+    '''
+    params = [image_id]
+    if creator is not None:
+        query += ' AND images.creator = ?'
+        params.append(creator)
+    cursor.execute(query, params)
     row = cursor.fetchone()
     conn.close()
 
@@ -621,12 +639,12 @@ def get_image_by_task_id(task_id: str) -> Optional[ImageItem]:
 def update_image(image_item: ImageItem) -> None:
     conn = get_db_connection()
     cursor = conn.cursor()
-    
+
     cursor.execute('''
         UPDATE images SET
             url = ?, thumbnail = ?, prompt = ?, model = ?, size = ?, quality = ?,
             task_id = ?, local_path = ?, thumbnail_path = ?, title = ?, updated_at = ?,
-            parent_id = ?, folder_path = ?, image_type = ?, poster_copy = ?
+            parent_id = ?, folder_path = ?, image_type = ?, poster_copy = ?, creator = ?
         WHERE id = ?
     ''', (
         image_item.url,
@@ -644,9 +662,10 @@ def update_image(image_item: ImageItem) -> None:
         image_item.folder_path,
         image_item.image_type,
         image_item.poster_copy,
+        image_item.creator or '',
         image_item.id
     ))
-    
+
     conn.commit()
     conn.close()
 

@@ -6,6 +6,45 @@ from typing import Optional, Dict, Any, List, Tuple
 from PIL import Image as PILImage
 
 
+# 支持的图片输出格式 -> 文件后缀映射
+# 功能描述：
+#     不同 output_format 对应不同的文件后缀，避免出现“文件内容是 JPEG、文件名却是 .png”的情况，
+#     从而保证前端 ImageLibrary / EditBoard 等模块从 URL 扩展名正确识别图片格式。
+# 实现逻辑：
+#     1. 仅映射我们项目实际用到的三种格式（png / jpeg / webp），其余值统一回退到 png
+#     2. JPEG 在 Windows 与 macOS 上都接受 .jpg，因此统一用 .jpg
+FORMAT_TO_EXTENSION = {
+    'png': '.png',
+    'jpeg': '.jpg',
+    'jpg': '.jpg',
+    'webp': '.webp',
+}
+
+FORMAT_TO_MIME = {
+    'png': 'image/png',
+    'jpeg': 'image/jpeg',
+    'jpg': 'image/jpeg',
+    'webp': 'image/webp',
+}
+
+
+def resolve_image_extension(output_format):
+    """
+    根据输出格式返回对应的文件后缀（带 .）
+
+    功能描述：
+        把后端收到的 output_format 字符串（png / jpeg / webp 等）映射为磁盘文件后缀。
+        对于未知或缺失的格式，默认返回 .png 以保持与历史行为一致。
+
+    实现逻辑：
+        1. 先做大小写无关的 strip，避免 ' JPEG ' 这类带空格/大小写问题
+        2. 在 FORMAT_TO_EXTENSION 中查表，未命中则回退到 .png
+    """
+    if not output_format or not isinstance(output_format, str):
+        return '.png'
+    return FORMAT_TO_EXTENSION.get(output_format.strip().lower(), '.png')
+
+
 # 通用图片数据处理工具
 # 功能描述：
 #     提取 task_processor.py 和 images.py 中重复出现的图片处理逻辑到一个独立的类中
@@ -14,26 +53,42 @@ from PIL import Image as PILImage
 #     所有方法均为静态方法，无需实例化即可调用
 #     每个方法独立处理一种图片格式，失败时返回明确的错误信息
 class ImageDataProcessor:
+    @staticmethod
+    def to_data_url(b64_data: str, output_format: str = 'png') -> str:
+        """
+        Convert raw b64_json into a browser-renderable data URL.
+        """
+        if not b64_data:
+            return ''
+        if b64_data.startswith('data:'):
+            return b64_data
+        fmt = (output_format or 'png').strip().lower()
+        mime = FORMAT_TO_MIME.get(fmt, 'image/png')
+        return f'data:{mime};base64,{b64_data}'
 
     @staticmethod
-    def save_b64_image(b64_data: str, output_dir: str, filename_prefix: str = '') -> Tuple[Optional[str], Optional[str], Optional[str]]:
+    def save_b64_image(b64_data: str, output_dir: str, filename_prefix: str = '', output_format: str = 'png') -> Tuple[Optional[str], Optional[str], Optional[str]]:
         """
-        解码 base64 图片数据并保存为本地 PNG 文件
+        解码 base64 图片数据并按指定格式保存为本地文件
 
         功能描述：
-            将 base64 编码的图片数据解码并保存到指定目录，返回本地路径和访问 URL
+            将 base64 编码的图片数据解码并保存到指定目录，返回本地路径和访问 URL。
+            文件后缀由 output_format 决定：png -> .png，jpeg -> .jpg，webp -> .webp；
+            缺失或未知值回退到 .png，确保与历史行为兼容。
 
         实现逻辑：
             1. 解码 base64 字符串为二进制数据
-            2. 生成唯一的文件名（uuid.hex）
-            3. 确保目标目录存在
-            4. 将图片数据写入本地文件（PNG 格式）
-            5. 返回本地文件路径、静态访问 URL 和可能的错误信息
+            2. 生成唯一的文件名（uuid.hex + 后缀）
+            3. 通过 resolve_image_extension 决定实际后缀，避免“内容是 JPEG、文件名却是 .png”
+            4. 确保目标目录存在
+            5. 将图片数据写入本地文件
+            6. 返回本地文件路径、静态访问 URL 和可能的错误信息
 
         参数：
             b64_data: base64 编码的图片数据字符串
             output_dir: 输出目录的绝对路径
             filename_prefix: 文件名前缀（可选）
+            output_format: 期望的图片输出格式（png / jpeg / webp），用于决定磁盘文件后缀
 
         返回：
             (local_path, static_url, error) 三元组，成功时 error 为 None
@@ -49,13 +104,16 @@ class ImageDataProcessor:
         try:
             os.makedirs(output_dir, exist_ok=True)
             prefix = f"{filename_prefix}_" if filename_prefix else ''
-            filename = f"{prefix}{uuid.uuid4().hex}.png"
+            extension = resolve_image_extension(output_format)
+            filename = f"{prefix}{uuid.uuid4().hex}{extension}"
             local_path = os.path.join(output_dir, filename)
 
             with open(local_path, 'wb') as f:
                 f.write(image_bytes)
 
-            static_url = f"/api/static/generated_images/{filename}"
+            generated_root = ImageDataProcessor.get_output_dir()
+            relative_path = os.path.relpath(local_path, generated_root)
+            static_url = f"/api/static/generated_images/{relative_path.replace(os.sep, '/')}"
 
             return local_path, static_url, None
 
@@ -155,15 +213,17 @@ class ImageDataProcessor:
             item_url = item.get('url', '') or ''
 
             if prefer_b64 and item_b64:
+                cleaned_b64 = ImageDataProcessor.strip_b64_prefix(item_b64)
                 local_path, static_url, error = ImageDataProcessor.save_b64_image(
-                    item_b64, output_dir, f"task_{task_id}_{idx}"
+                    cleaned_b64, output_dir, f"task_{task_id}_{idx}"
                 )
                 results.append({
                     'index': idx,
                     'type': 'b64_json',
                     'url': static_url or '',
                     'local_path': local_path,
-                    'original_b64': item_b64,
+                    'original_b64': cleaned_b64,
+                    'b64_data_url': ImageDataProcessor.to_data_url(cleaned_b64),
                     'error': error
                 })
                 if error:
@@ -177,15 +237,17 @@ class ImageDataProcessor:
                     'error': None
                 })
             elif item_b64:
+                cleaned_b64 = ImageDataProcessor.strip_b64_prefix(item_b64)
                 local_path, static_url, error = ImageDataProcessor.save_b64_image(
-                    item_b64, output_dir, f"task_{task_id}_{idx}"
+                    cleaned_b64, output_dir, f"task_{task_id}_{idx}"
                 )
                 results.append({
                     'index': idx,
                     'type': 'b64_json',
                     'url': static_url or '',
                     'local_path': local_path,
-                    'original_b64': item_b64,
+                    'original_b64': cleaned_b64,
+                    'b64_data_url': ImageDataProcessor.to_data_url(cleaned_b64),
                     'error': error
                 })
             else:
@@ -226,8 +288,9 @@ class ImageDataProcessor:
         image_url = item.get('url', '') or ''
 
         if b64_data:
+            cleaned_b64 = ImageDataProcessor.strip_b64_prefix(b64_data)
             local_path, static_url, error = ImageDataProcessor.save_b64_image(
-                b64_data, output_dir, f"task_{task_id}"
+                cleaned_b64, output_dir, f"task_{task_id}"
             )
             if error:
                 print(f"[ImageDataProcessor] Single item b64 save failed: {error}")

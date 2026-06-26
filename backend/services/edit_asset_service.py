@@ -32,6 +32,7 @@ from services.folder_service import (
     sanitize_folder_name
 )
 from services.thumbnail_service import create_thumbnail_from_local
+from services.creator_storage import creator_storage_dir, creator_subdir
 
 
 EDIT_THUMBNAILS_DIR = os.path.join(PROJECT_ROOT_DIR, 'edit_thumbnails')
@@ -169,7 +170,7 @@ def prepare_edit_image_assets(image_url: str, folder_path: str, filename: Option
 # 将编辑结果直接保存到 edit_folders 根目录
 # 替代旧的 create_edit_folder 子文件夹逻辑，直接将编辑结果原图和缩略图
 # 保存在 edit_folders 和 edit_thumbnails 根目录下
-def save_edit_result_directly(image_url: str, prompt: str = '', size: str = None) -> Dict[str, Any]:
+def save_edit_result_directly(image_url: str, prompt: str = '', size: str = None, creator: str = '') -> Dict[str, Any]:
     """
     将编辑结果直接保存到 edit_folders 根目录
 
@@ -191,12 +192,16 @@ def save_edit_result_directly(image_url: str, prompt: str = '', size: str = None
     ensure_edit_folders_dir()
     ensure_edit_thumbnails_dir()
 
+    creator_dir = creator_subdir(creator)
+    target_edit_dir = creator_storage_dir(EDIT_FOLDERS_DIR, creator)
+    os.makedirs(target_edit_dir, exist_ok=True)
+
     safe_prompt = sanitize_folder_name(prompt or 'edited')[:20]
     timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
     random_suffix = str(uuid.uuid4())[:8]
     filename = f"edit_{safe_prompt}_{timestamp}_{random_suffix}.png"
 
-    local_path = os.path.join(EDIT_FOLDERS_DIR, filename)
+    local_path = os.path.join(target_edit_dir, filename)
 
     download_result = download_image_to_local(image_url, local_path)
 
@@ -207,7 +212,7 @@ def save_edit_result_directly(image_url: str, prompt: str = '', size: str = None
         }
 
     local_path = download_result['local_path']
-    image_relative_path = filename
+    image_relative_path = os.path.relpath(local_path, EDIT_FOLDERS_DIR)
     image_url_value = build_edit_image_url(image_relative_path)
 
     thumbnail_url = ''
@@ -215,7 +220,7 @@ def save_edit_result_directly(image_url: str, prompt: str = '', size: str = None
     thumbnail_error = ''
 
     try:
-        thumbnail_result = create_edit_thumbnail_from_local(local_path, '')
+        thumbnail_result = create_edit_thumbnail_from_local(local_path, creator_dir)
         thumbnail_url = thumbnail_result.get('thumbnail_url', '')
         thumbnail_path = thumbnail_result.get('thumbnail_path')
     except (ValueError, RuntimeError) as err:

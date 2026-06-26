@@ -1,5 +1,6 @@
 <script setup>
-import { ref, computed, onMounted, onUnmounted, watch } from 'vue'
+import { ref, computed, onMounted, onUnmounted, watch, nextTick } from 'vue'
+import { useRouter } from 'vue-router'
 import { useImageStore } from '@/stores/imageStore'
 import { useConfigStore } from '@/stores/configStore'
 import { editImage, queryTask, api } from '@/services/api'
@@ -7,15 +8,22 @@ import ImageUpload from '@/components/common/ImageUpload/ImageUpload.vue'
 import EditBoard from '@/components/common/EditBoard/EditBoard.vue'
 import ImageSelector from '@/components/common/ImageSelector/ImageSelector.vue'
 import ConfirmDialog from '@/components/common/ConfirmDialog/ConfirmDialog.vue'
+import OptionDialog from '@/components/common/OptionDialog/OptionDialog.vue'
 import Select from '@/components/common/Select/Select.vue'
 import ImageCompare from '@/components/common/ImageCompare/ImageCompare.vue'
 import SaveToLibraryDialog from '@/components/common/SaveToLibraryDialog/SaveToLibraryDialog.vue'
 import ImageAnnotationModal from '@/components/ImageAnnotationModal.vue'
 import MaterialSelector from '@/components/MaterialSelector.vue'
 import ImagePreview from '@/components/ImagePreview.vue'
+import { formatApiSourceLabel } from '@/utils/platformDisplay'
+import { APIYI_ASPECT_RATIO_OPTIONS, APIYI_RESOLUTIONS, resolveApiyiSize } from '@/utils/apiyiOptions'
+// 引入 gpt-image-2 编辑接口的最大边长限制常量（详见 e:\AI-image\新建文件夹\修改图片.md）
+// RESOLUTION_PRESETS 提供 1K / 2K / 4K 三个分辨率选项，供超限图片弹窗使用
+import { GPT_IMAGE_MAX_EDGE, RESOLUTION_PRESETS, getMaxEdgeForPreset } from '@/utils/imageCompressor'
 
 const imageStore = useImageStore()
 const configStore = useConfigStore()
+const router = useRouter()
 
 const props = defineProps({
   imageId: {
@@ -26,10 +34,21 @@ const props = defineProps({
 
 const BOARD_STORAGE_KEY = 'edit_board_images'
 const EDIT_VIEW_PREFS_KEY = 'edit_view_prefs'
+const IMAGE_GENERATOR_PREFS_KEY = 'image_generator_prefs'
 
 function loadEditViewPrefs() {
   try {
     const data = localStorage.getItem(EDIT_VIEW_PREFS_KEY)
+    if (data) {
+      return JSON.parse(data)
+    }
+  } catch {}
+  return {}
+}
+
+function loadImageGeneratorPrefs() {
+  try {
+    const data = localStorage.getItem(IMAGE_GENERATOR_PREFS_KEY)
     if (data) {
       return JSON.parse(data)
     }
@@ -45,6 +64,7 @@ function saveEditViewPrefs(prefs) {
 }
 
 const savedEditViewPrefs = loadEditViewPrefs()
+const savedImageGeneratorPrefs = loadImageGeneratorPrefs()
 
 const isAsync = ref(false)
 const submitting = ref(false)
@@ -80,26 +100,79 @@ const previewRefImage = ref(null)
 const maxEditRefImages = computed(() => selectedApiProvider.value === 'fal' ? 4 : 16)
 
 const editPrompt = ref('')
+// 编辑指令预设片段弹窗显隐状态
+const showSnippetMenu = ref(false)
+// 编辑指令预设片段弹窗触发按钮的 ref，用于 click-outside 判定
+const snippetMenuButtonRef = ref(null)
+// 编辑指令预设片段弹窗根节点 ref
+const snippetMenuPopoverRef = ref(null)
 const editAspectRatio = ref('auto')
 const editResolution = ref('2K')
 const editQuality = ref('auto')
 const editOutputFormat = ref('png')
 const editOutputCompression = ref(100)
+const editModeration = ref('auto')
 // 当前选择的 API 提供者（openai 或 fal），从 localStorage 恢复
 const selectedApiProvider = ref(savedEditViewPrefs.selectedApiProvider || 'openai')
 // 当前选择的模型，从 localStorage 恢复
 const selectedModel = ref(savedEditViewPrefs.selectedModel || 'gpt-image-2')
+// 制作人：本地属性，保存到 images.creator，不发送到编辑 API
+// 恢复顺序：currentEditingImage.creator（仅当为图库已有图片时）-> 编辑页偏好 -> 生图页偏好 -> 空字符串
+const selectedCreator = ref(savedEditViewPrefs.creator || savedImageGeneratorPrefs.creator || '')
+// 制作人下拉选项：从 configStore.creatorOptions.options 派生（设置页可配置）
+const creatorOptions = computed(() => {
+  const list = Array.isArray(configStore.creatorOptions?.options) ? configStore.creatorOptions.options : []
+  return list.map((name) => ({ value: name, label: name }))
+})
+// 制作人筛选下拉选项：在画板工具栏使用；首项固定为「全部制作人」(value='')，
+// 后续项来自 configStore.creatorOptions.options。与右侧编辑面板的 creatorOptions 区分开：
+//   - 右侧编辑面板的 creatorOptions：不包含「全部」选项，用于设置新图片的 creator
+//   - 画板工具栏的 filterCreatorOptions：包含「全部」选项，用于筛选显示的图片
+// 两者共享 selectedCreator 状态：选「全部」时 selectedCreator 为空串，
+// 过滤逻辑将空串视作"不过滤"，与生图页 ImageLibrary 的 creator 筛选行为一致
+const filterCreatorOptions = computed(() => {
+  return [
+    { value: '', label: '全部制作人' },
+    ...creatorOptions.value
+  ]
+})
+// 按制作人筛选后的画板图片列表
+// 实现逻辑：
+//   1. selectedCreator 为空串时不过滤，返回完整 boardImages
+//   2. selectedCreator 非空时，精确匹配每张图片的 creator 字段
+//   3. 为每张图补齐默认 creator（空串），避免历史图片没有 creator 字段导致比较失败
+// 边界场景：
+//   - 临时图片（local/edited/pending- 前缀）若没有 creator，匹配不到任何非空筛选值，
+//     用户在筛选非空制作人时不会看到这些临时图，这是符合预期的
+const filteredBoardImages = computed(() => {
+  const filterValue = selectedCreator.value || ''
+  const source = Array.isArray(boardImages.value) ? boardImages.value : []
+  if (!filterValue) return source
+  return source.filter((img) => ((img && img.creator) || '') === filterValue)
+})
 const isGptsapiProvider = computed(() => selectedApiProvider.value === 'gptsapi')
+// APIYI 也属于"仅异步"端口，gptsapi/apiyi/fal 共享比例/res 紧凑行 UI 与异步任务卡逻辑
+const isApiyiProvider = computed(() => selectedApiProvider.value === 'apiyi')
+const isApiyiGptImage2 = computed(() => selectedApiProvider.value === 'apiyi' && selectedModel.value.replace('apiyi/', '') === 'gpt-image-2')
+const isApiyiGptImage2Vip = computed(() => selectedApiProvider.value === 'apiyi' && selectedModel.value.replace('apiyi/', '') === 'gpt-image-2-vip')
+const isAsyncOnlyProvider = computed(() => isGptsapiProvider.value || isApiyiProvider.value || selectedApiProvider.value === 'fal')
+const usesCompactEditSizeOptions = computed(() => isGptsapiProvider.value || (isApiyiProvider.value && !isApiyiGptImage2.value))
 
 // 根据选择的 API 提供者返回对应的模型列表
+// APIYI 固定返回带前缀的模型名，便于后端识别 apiSource 与剥离前缀
 const editModels = computed(() => {
   if (selectedApiProvider.value === 'fal') {
-    return Array.isArray(configStore.falApi.falModels) && configStore.falApi.falModels.length > 0
-      ? configStore.falApi.falModels
-      : ['openai/gpt-image-2']
+    return ['openai/gpt-image-2']
   }
   if (selectedApiProvider.value === 'gptsapi') {
     return ['gptsapi/gpt-image-2']
+  }
+  if (selectedApiProvider.value === 'apiyi') {
+    const configuredModels = Array.isArray(configStore.apiyiApi?.imageModels) && configStore.apiyiApi.imageModels.length > 0
+      ? configStore.apiyiApi.imageModels
+      : ['gpt-image-2-vip', 'gpt-image-2']
+    const mergedModels = Array.from(new Set([...configuredModels, 'gpt-image-2']))
+    return mergedModels.map(model => model.startsWith('apiyi/') ? model : `apiyi/${model}`)
   }
   return Array.isArray(configStore.imageApi.imageModels) && configStore.imageApi.imageModels.length > 0
     ? configStore.imageApi.imageModels
@@ -113,7 +186,8 @@ const editModelOptions = computed(() => {
   }))
 })
 
-// 根据是否有 Fal API Key 动态生成 API 提供者选项
+// 根据是否有对应 API Key 动态生成 API 提供者选项
+// 仅在用户已配置 API Key 时才显示对应端口（避免空 Key 提交失败）
 const editApiProviderOptions = computed(() => {
   const options = [
     { value: 'openai', label: 'OpenAI 兼容' }
@@ -123,12 +197,21 @@ const editApiProviderOptions = computed(() => {
     options.push({ value: 'fal', label: 'Fal API' })
   }
   options.push({ value: 'gptsapi', label: 'GPTsAPI' })
+  // APIYI 端口：仅在配置了 API Key 时显示，与 Fal 同样的策略
+  const hasApiyiApiKey = configStore.apiyiApi?.apiKey?.trim()
+  if (hasApiyiApiKey) {
+    options.push({ value: 'apiyi', label: 'APIYI' })
+  }
   return options
 })
 
 // 根据比例+分辨率查表得出实际尺寸，供画板卡片展示比例
 // auto 时用 1:1 + 分辨率算出默认尺寸，确保卡片始终能正确显示比例
 const resolvedEditSize = computed(() => {
+  if (isApiyiProvider.value && !isApiyiGptImage2.value) {
+    return resolveApiyiSize(editAspectRatio.value, editResolution.value)
+  }
+
   const aspect = editAspectRatio.value === 'auto' ? '1:1' : editAspectRatio.value
   const key = resolutions.find(r => r.value === editResolution.value)?.key || '2k'
   return sizeMap[aspect]?.[key] || '1024x1024'
@@ -143,6 +226,18 @@ const confirmDialogConfig = ref({
   cancelText: '取消',
   danger: false,
   onConfirm: () => {}
+})
+
+// 超限图片压缩分辨率选择弹窗
+// 字段说明：
+//   visible: 是否显示弹窗
+//   originalSize: 原图尺寸 { width, height }
+//   pendingDecision: resolve 函数，等待用户选择后调用
+//   弹窗会通过 select 事件接收分辨率值，调用 pendingDecision 唤醒 ImageUpload 的上传流程
+const showResolutionDialog = ref(false)
+const resolutionDialogContext = ref({
+  originalSize: null,
+  pendingResolve: null
 })
 
 const POLL_INTERVAL_MS = 3000
@@ -162,7 +257,8 @@ const aspectRatioOptions = [
   { value: '4:3', label: '4:3' },
   { value: '3:4', label: '3:4' },
   { value: '5:4', label: '5:4' },
-  { value: '4:5', label: '4:5' }
+  { value: '4:5', label: '4:5' },
+  { value: 'wechat-cover', label: '公众号封面' }
 ]
 
 const gptsapiAspectRatioOptions = [
@@ -174,8 +270,10 @@ const gptsapiAspectRatioOptions = [
   { value: '3:4', label: '3:4' }
 ]
 
+// APIYI 也属于"仅异步"端口，gptsapi/apiyi/fal 都使用紧凑的「比例/res」布局，限制分辨率档位
 const currentEditAspectRatioOptions = computed(() => {
-  if (isGptsapiProvider.value) return gptsapiAspectRatioOptions
+  if (isApiyiProvider.value && !isApiyiGptImage2.value) return APIYI_ASPECT_RATIO_OPTIONS
+  if (usesCompactEditSizeOptions.value) return gptsapiAspectRatioOptions
   return [...aspectRatioOptions, { value: 'fullscreen', label: '全屏' }]
 })
 
@@ -187,7 +285,14 @@ const resolutions = [
 ]
 
 const currentEditResolutions = computed(() => {
-  if (!isGptsapiProvider.value) {
+  if (isApiyiGptImage2Vip.value) {
+    return []
+  }
+  if (isApiyiProvider.value) {
+    if (isApiyiGptImage2.value) return resolutions
+    return APIYI_RESOLUTIONS
+  }
+  if (!usesCompactEditSizeOptions.value) {
     return resolutions
   }
   if (editAspectRatio.value === 'auto') {
@@ -210,6 +315,7 @@ const sizeMap = {
   '2:3': { '1k': '832x1248', '2k': '1664x2496', '4k': '2336x3504' },
   '5:4': { '1k': '1120x896', '2k': '2240x1792', '4k': '3200x2560' },
   '4:5': { '1k': '896x1120', '2k': '1792x2240', '4k': '2560x3200' },
+  'wechat-cover': { '1k': '1456x624', '2k': '1456x624', '4k': '1456x624' },
   'fullscreen': { '1k': '688x1488', '2k': '1072x2336', '4k': '1760x3840' }
 }
 
@@ -224,6 +330,11 @@ const outputFormatOptions = [
   { value: 'png', label: 'PNG' },
   { value: 'jpeg', label: 'JPEG' },
   { value: 'webp', label: 'WebP' }
+]
+
+const moderationOptions = [
+  { value: 'auto', label: 'Auto' },
+  { value: 'low', label: 'Low' }
 ]
 
 // 当前编辑图片，直接返回 currentEditingImage
@@ -268,6 +379,8 @@ const saveBoardToStorage = () => {
       thumbnail: img.thumbnail,
       prompt: img.prompt,
       poster_copy: img.poster_copy || '',
+      // 制作人：缓存到 localStorage，避免刷新后筛选失效
+      creator: img.creator || '',
       generating: img.generating,
       error: img.error,
       taskId: img.taskId,
@@ -320,6 +433,9 @@ const fetchEditImages = async () => {
         thumbnail: img.thumbnail || img.display_url || img.url || '',
         prompt: img.prompt || img.title || '',
         poster_copy: img.poster_copy || '',
+        // 制作人：从 images.creator 字段读取，供画板工具栏筛选使用
+        // 后端 serialize_image 通过 dict(image_item.__dict__) 输出该字段
+        creator: img.creator || '',
         generating: !!img.generating,
         error: img.error || '',
         taskId: img.taskId || null,
@@ -435,6 +551,79 @@ const handleFileSelected = (file) => {
   console.log('File selected for editing:', file.name)
 }
 
+// 图片上传触发自动压缩后的回调：用于向用户提示「原图分辨率过高，已自动压缩」
+// 实现逻辑：
+//   1. 从事件 payload 中拿到原图尺寸 / 压缩后尺寸 / 最大边长
+//   2. 复用页面现有的 toast 通知，提示压缩结果
+//   3. 任何字段缺失时仍提示成功压缩，避免 UI 出现空白文案
+const handleUploadCompressed = (info) => {
+  if (!info || !info.compressed) return
+  const { originalSize, newSize, maxEdge } = info
+  const original = originalSize ? `${originalSize.width}x${originalSize.height}` : '未知'
+  const next = newSize ? `${newSize.width}x${newSize.height}` : `≤${maxEdge}px`
+  showSaveNotification(`图片分辨率超过限制，已自动压缩：${original} → ${next}`, 'success')
+}
+
+// 图片分辨率超过 maxEdge 时由 ImageUpload 调用的回调
+// 实现逻辑：
+//   1. 把 originalSize 写入 context，弹出分辨率选择弹窗
+//   2. 返回 Promise，等待用户在弹窗里选择 1K / 2K / 4K / 取消
+//   3. 用户选择分辨率 → resolve({ maxEdge })
+//   4. 用户选择「取消」/ 关闭弹窗 → resolve({ abort: true })
+//   5. 任何异常都通过 catch 兜底，回退到默认 maxEdge 自动压缩
+const handleUploadOversize = ({ originalSize, defaultMaxEdge }) => {
+  return new Promise((resolve) => {
+    resolutionDialogContext.value = {
+      originalSize,
+      pendingResolve: resolve
+    }
+    showResolutionDialog.value = true
+  })
+}
+
+// 分辨率选择弹窗：用户点选某个选项
+// 实现逻辑：
+//   1. 从 value (1K/2K/4K) 找到对应 maxEdge
+//   2. 唤醒 pendingResolve，把决策交给 ImageUpload
+//   3. 清空弹窗 context，关闭弹窗
+const handleResolutionSelect = (value) => {
+  const maxEdge = getMaxEdgeForPreset(value, GPT_IMAGE_MAX_EDGE)
+  const resolve = resolutionDialogContext.value.pendingResolve
+  if (typeof resolve === 'function') {
+    resolve({ maxEdge })
+  }
+  resolutionDialogContext.value = { originalSize: null, pendingResolve: null }
+  showResolutionDialog.value = false
+}
+
+// 分辨率选择弹窗：用户选择「取消」/ 关闭 / Esc / 点击遮罩
+// 实现逻辑：把 abort 决策交给 ImageUpload，由组件清空进度且不上传
+const handleResolutionCancel = () => {
+  const resolve = resolutionDialogContext.value.pendingResolve
+  if (typeof resolve === 'function') {
+    resolve({ abort: true })
+  }
+  resolutionDialogContext.value = { originalSize: null, pendingResolve: null }
+  showResolutionDialog.value = false
+}
+
+// 弹窗标题 / 描述：根据原图尺寸动态生成
+// 实现逻辑：
+//   1. 提示用户当前图片超出 gpt-image-2 编辑接口上限
+//   2. 给出原图尺寸 + 接口上限 3840px
+//   3. options 直接复用 RESOLUTION_PRESETS（imageCompressor 导出）
+const resolutionDialogMessage = computed(() => {
+  const size = resolutionDialogContext.value.originalSize
+  const sizeText = size ? `${size.width} × ${size.height} px` : '当前分辨率过高'
+  return `${sizeText}，超过 gpt-image-2 编辑接口的最大边长 ${GPT_IMAGE_MAX_EDGE}px。请选择压缩目标分辨率：`
+})
+
+const resolutionDialogOptions = RESOLUTION_PRESETS.map((preset) => ({
+  value: preset.value,
+  label: preset.label,
+  description: preset.description
+}))
+
 const addImageToBoard = (image) => {
   boardImages.value.unshift(image)
   selectedImageId.value = image.id
@@ -486,6 +675,92 @@ const handleBoardDelete = (image) => {
       }
     }
   })
+}
+
+// 失败任务重试（仅 APIYI）
+// 功能描述：
+//     调后端 /api/images/apiyi/retry 把失败的 task 重新提交；后端校验通过后
+//     会把 image 状态翻回 generating 并启动新一轮轮询
+// 实现逻辑：
+//     1. 校验 image.apiSource === 'apiyi' 且有 taskId
+//     2. POST { task_id } 到重试接口
+//     3. ok=true：把 image.error 清空、generating=true，调用 startPolling 重新轮询
+//     4. ok=false：弹 confirmDialog 展示 error_code + error，提示用户重新提交
+// 异常处理：网络/JSON 解析异常时弹 confirmDialog 提示；不动 image 状态
+const handleBoardRetry = async (image) => {
+  if (!image || !image.taskId) {
+    openConfirmDialog({
+      title: '重试失败',
+      message: '该任务没有 taskId，无法重试',
+      confirmText: '知道了',
+      cancelText: '关闭',
+      danger: false,
+      onConfirm: () => {}
+    })
+    return
+  }
+  if (image.apiSource !== 'apiyi') {
+    openConfirmDialog({
+      title: '暂不支持',
+      message: '当前仅 APIYI 平台支持失败任务重试',
+      confirmText: '知道了',
+      cancelText: '关闭',
+      danger: false,
+      onConfirm: () => {}
+    })
+    return
+  }
+  try {
+    const resp = await fetch('/api/images/apiyi/retry', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ task_id: image.taskId })
+    })
+    const data = await resp.json().catch(() => ({}))
+    if (resp.ok && data.ok) {
+      // 重置为生成中，让 EditBoard 显示 generating overlay，重新开始轮询
+      Object.assign(image, {
+        generating: true,
+        error: '',
+        retryCount: data.retry_count || (image.retryCount || 0) + 1
+      })
+      saveBoardToStorage()
+      startPolling(image.taskId, image.id)
+      return
+    }
+    // 失败时弹 confirmDialog 提示
+    const errCode = data.error_code || 'unknown'
+    const errMsg = data.error || `重试请求失败 (HTTP ${resp.status})`
+    const hint = errCode === 'temp_files_missing'
+      ? '临时文件已失效，请直接重新提交编辑任务'
+      : errCode === 'image_missing'
+        ? '图片记录已不存在，请重新提交'
+        : errCode === 'status_not_failure'
+          ? '该任务状态已变化，请刷新页面查看'
+          : errMsg
+    openConfirmDialog({
+      title: '重试失败',
+      message: `${hint}\n\n错误码：${errCode}`,
+      confirmText: '重新提交',
+      cancelText: '关闭',
+      danger: false,
+      onConfirm: () => {
+        // 重新提交：把 image 从 board 移除（用户回到编辑面板手动重提）
+        const index = boardImages.value.findIndex(img => img.id === image.id)
+        if (index !== -1) boardImages.value.splice(index, 1)
+        saveBoardToStorage()
+      }
+    })
+  } catch (err) {
+    openConfirmDialog({
+      title: '重试异常',
+      message: `网络异常：${err.message || err}`,
+      confirmText: '知道了',
+      cancelText: '关闭',
+      danger: false,
+      onConfirm: () => {}
+    })
+  }
 }
 
 // 批量删除（同步删除数据库记录）
@@ -579,20 +854,56 @@ const handleAddToPreparation = (image) => {
     cancelText: '取消',
     onConfirm: async () => {
       const displayName = image.title || image.display_name || image.prompt?.slice(0, 30) || ''
-      const platform = image.apiSource === 'fal' ? 'Fal' : image.apiSource === 'gptsapi' ? 'GPTsAPI' : 'T8'
+      const platform = formatApiSourceLabel(image.apiSource)
       const copyText = getPreparationCopyText(image)
       const posterCopy = getImagePosterCopy(image)
+      // 制作人：随图片一起透传到后端，保存到 preparation_items.creator
+      const creatorValue = (selectedCreator.value || '').trim()
       try {
         await api.post('/api/preparation/copy-from', {
           image_url: imageUrl,
           display_name: displayName,
           platform: platform,
           copy_text: copyText,
-          poster_copy: posterCopy
+          poster_copy: posterCopy,
+          creator: creatorValue
         })
         showSaveNotification('已添加到预备目录', 'success')
       } catch (e) {
         showSaveNotification('添加到预备目录失败', 'error')
+      }
+    }
+  })
+}
+
+const handleAddToGeo = (image) => {
+  const imageUrl = image.url || image.thumbnail || ''
+  if (!imageUrl) return
+  openConfirmDialog({
+    title: '确认添加',
+    message: '确定要将此图片添加到GEO目录吗？',
+    confirmText: '确定',
+    cancelText: '取消',
+    onConfirm: async () => {
+      const displayName = image.title || image.display_name || image.prompt?.slice(0, 30) || ''
+      const platform = formatApiSourceLabel(image.apiSource)
+      const copyText = getPreparationCopyText(image)
+      const posterCopy = image.poster_copy || ''
+      // 制作人：随图片一起透传到后端，保存到 geo_items.creator
+      const creatorValue = (selectedCreator.value || '').trim()
+      try {
+        await api.post('/api/geo/copy-from', {
+          image_url: imageUrl,
+          display_name: displayName,
+          platform: platform,
+          copy_text: copyText,
+          poster_copy: posterCopy,
+          creator: creatorValue
+        })
+        showSaveNotification('已添加到GEO目录', 'success')
+        router.push('/geo')
+      } catch (e) {
+        showSaveNotification('添加到GEO目录失败', 'error')
       }
     }
   })
@@ -609,7 +920,10 @@ const handleSelectFromLibrary = (image) => {
     url: image.url,
     thumbnail: image.thumbnail || image.url,
     prompt: image.prompt || image.title || '已选择图片',
-    poster_copy: image.poster_copy || ''
+    poster_copy: image.poster_copy || '',
+    // 制作人：从图库选中的图片保留原 creator，用于右侧编辑面板的初始值
+    // 当用户后续点击「开始编辑」时，watch(currentEditingImage) 会用此值覆盖 selectedCreator
+    creator: image.creator || ''
   }
   showSelector.value = false
 }
@@ -774,8 +1088,58 @@ const handleAnnotationSave = async (data) => {
 }
 
 const toggleAsync = () => {
-  if (selectedApiProvider.value === 'gptsapi') return
   isAsync.value = !isAsync.value
+}
+
+// 切换预设片段弹窗显示状态
+const toggleSnippetMenu = () => {
+  showSnippetMenu.value = !showSnippetMenu.value
+}
+
+// 关闭预设片段弹窗
+const closeSnippetMenu = () => {
+  showSnippetMenu.value = false
+}
+
+// 将选中片段的 content 追加到 editPrompt 末尾
+// 实现逻辑：
+//   1. 若 editPrompt 已存在非空内容，前置换行以确保与原文分隔
+//   2. textarea 自身的 maxlength=1000 负责最终截断（提示用户追加后可能超长）
+//   3. 追加完成后弹窗自动关闭，光标自动聚焦到 textarea
+const appendSnippetToPrompt = (snippet) => {
+  if (!snippet || typeof snippet.content !== 'string') return
+  const content = snippet.content
+  if (editPrompt.value && editPrompt.value.trim().length > 0) {
+    // 已存在内容：换行 + 片段内容
+    editPrompt.value = editPrompt.value.replace(/\s*$/, '') + '\n' + content
+  } else {
+    editPrompt.value = content
+  }
+  closeSnippetMenu()
+  // 焦点回到 textarea（nextTick 确保弹窗已关闭再聚焦）
+  nextTick(() => {
+    const ta = document.querySelector('.edit-view__textarea')
+    if (ta) {
+      ta.focus()
+      // 把光标移到末尾
+      const len = editPrompt.value.length
+      ta.setSelectionRange(len, len)
+    }
+  })
+}
+
+// 全局 mousedown 监听：点击片段按钮 / popover 外部时关闭 popover
+// 兜底逻辑：同时考虑 mousedown 阶段关闭，避免与按钮 click 事件竞态
+const handleDocumentMouseDown = (event) => {
+  if (!showSnippetMenu.value) return
+  const target = event.target
+  const buttonEl = snippetMenuButtonRef.value
+  const popoverEl = snippetMenuPopoverRef.value
+  const inButton = buttonEl && (buttonEl === target || buttonEl.contains(target))
+  const inPopover = popoverEl && (popoverEl === target || popoverEl.contains(target))
+  if (!inButton && !inPopover) {
+    closeSnippetMenu()
+  }
 }
 
 const handleEditSubmit = async () => {
@@ -833,6 +1197,9 @@ const handleEditSubmit = async () => {
     console.log(`[EditView] 参考图数量: ${editReferenceImages.value.length}, 详情:`, editReferenceImages.value.map(r => ({ id: r.id, url: r.url?.slice(0, 50), uploaded: r.uploaded, uploading: r.uploading })))
     let refAddedCount = 0
     const refUrlFallbackList = []
+    // _ref_image_urls 仅 Fal 编辑通道使用（见 routes/images.py 第 2626 行）
+    // APIYI / gptsapi / openai 通道后端未读取此字段，避免无效负载
+    const supportsRefUrlFallback = selectedApiProvider.value === 'fal'
     for (const refImg of editReferenceImages.value) {
       try {
         const refResp = await fetch(refImg.url)
@@ -842,24 +1209,36 @@ const handleEditSubmit = async () => {
         formData.append('image', refFile)
         refAddedCount++
       } catch (e) {
-        // CORS 限制时无法通过 fetch 获取图片，将 URL 发给后端处理
-        console.warn('[EditView] 参考图 fetch 失败，改用 URL 方式:', refImg.url?.slice(0, 80), e)
-        refUrlFallbackList.push(refImg.url)
+        if (supportsRefUrlFallback) {
+          // CORS 限制时无法通过 fetch 获取图片，将 URL 发给后端处理
+          console.warn('[EditView] 参考图 fetch 失败，改用 URL 方式:', refImg.url?.slice(0, 80), e)
+          refUrlFallbackList.push(refImg.url)
+        } else {
+          // APIYI / openai / gptsapi 不支持 URL fallback，记录后跳过
+          console.warn('[EditView] 参考图 fetch 失败且当前通道不支持 URL fallback，跳过:', refImg.url?.slice(0, 80), e)
+        }
       }
     }
     if (refUrlFallbackList.length > 0) {
       formData.append('_ref_image_urls', JSON.stringify(refUrlFallbackList))
       refAddedCount += refUrlFallbackList.length
     }
-    formData.append('_diagnostic_ref_count', String(refAddedCount))
+    // _diagnostic_ref_count 仅用于后端 print 日志（routes/images.py:2312），APIYI 通道无意义
+    if (selectedApiProvider.value !== 'apiyi') {
+      formData.append('_diagnostic_ref_count', String(refAddedCount))
+    }
 
     formData.append('prompt', editPrompt.value)
     formData.append('model', selectedModel.value)
     formData.append('api_provider', selectedApiProvider.value)
     if (sourceImage.id) formData.append('parent_id', sourceImage.id)
+    // 制作人：本地属性，作为图片元数据保存到 images.creator（后端 images.py 已读取 data.get('creator')）
+    formData.append('creator', selectedCreator.value || '')
 
     // 如果有遮罩，转换为文件并添加到请求
-    if (sourceImage.maskImage) {
+    // APIYI 不支持 mask（详见 e:\AI-image\新建文件夹\apiyi\图片编辑.md，文档未列出该字段），避免无效负载
+    // 其他通道（openai/fal/gptsapi）保留 mask 上传
+    if (sourceImage.maskImage && (selectedApiProvider.value !== 'apiyi' || isApiyiGptImage2.value)) {
       const maskBlob = dataURItoBlob(sourceImage.maskImage)
       if (maskBlob) {
         const maskFile = new File([maskBlob], 'mask.png', { type: 'image/png' })
@@ -867,12 +1246,24 @@ const handleEditSubmit = async () => {
       }
     }
     // 当 aspect ratio 为 auto 时，使用源图的实际尺寸发送给后端
-    const editSize = editAspectRatio.value === 'auto' ? sourceSize : resolvedEditSize.value
+    const editSize = selectedApiProvider.value === 'apiyi' && !isApiyiGptImage2.value
+      ? resolvedEditSize.value
+      : (editAspectRatio.value === 'auto' ? sourceSize : resolvedEditSize.value)
     formData.append('size', editSize)
 
     if (selectedApiProvider.value === 'gptsapi') {
       formData.append('aspect_ratio', editAspectRatio.value)
       formData.append('resolution', editResolution.value)
+    } else if (selectedApiProvider.value === 'apiyi') {
+      if (isApiyiGptImage2.value) {
+        formData.append('background', 'auto')
+        formData.append('moderation', editModeration.value)
+        formData.append('quality', editQuality.value)
+        formData.append('output_format', editOutputFormat.value)
+        if (editOutputFormat.value === 'jpeg' || editOutputFormat.value === 'webp') {
+          formData.append('output_compression', editOutputCompression.value)
+        }
+      }
     } else {
       if (editQuality.value !== 'auto') formData.append('quality', editQuality.value)
       if (editOutputFormat.value !== 'png') formData.append('output_format', editOutputFormat.value)
@@ -881,7 +1272,9 @@ const handleEditSubmit = async () => {
       }
     }
 
-    const effectiveAsync = isAsync.value
+    const effectiveAsync = (selectedApiProvider.value === 'fal' || selectedApiProvider.value === 'apiyi')
+      ? true
+      : isAsync.value
     const result = await editImage(formData, effectiveAsync)
 
     if (effectiveAsync) {
@@ -895,7 +1288,11 @@ const handleEditSubmit = async () => {
         thumbnail: result.image?.thumbnail || '',
         prompt: result.image?.prompt || getNextEditPrompt(sourceImage.prompt, editPrompt.value),
         poster_copy: result.image?.poster_copy || getImagePosterCopy(sourceImage),
-        size: sourceSize,
+        // 制作人：随编辑请求提交到后端（后端 edit_image 已读取 formData.creator 写入 images.creator），
+        // 此处保存到前端 boardImages 是为了让画板筛选立刻生效，无需等待后端轮询
+        // 回退顺序：后端返回的 creator（异步任务可能未落库）-> selectedCreator -> 源图 creator
+        creator: (result.image?.creator || selectedCreator.value || sourceImage.creator || '').trim(),
+        size: editSize,
         generating: true,
         error: '',
         taskId: result.task_id,
@@ -923,6 +1320,8 @@ const handleEditSubmit = async () => {
         thumbnail: result.image?.thumbnail || result.image?.display_url || result.image?.url || '',
         prompt: result.image?.prompt || getNextEditPrompt(sourceImage.prompt, editPrompt.value),
         poster_copy: result.image?.poster_copy || getImagePosterCopy(sourceImage),
+        // 制作人：回退到后端返回的 creator -> selectedCreator -> 源图 creator，确保画板筛选可用
+        creator: (result.image?.creator || selectedCreator.value || sourceImage.creator || '').trim(),
         size: resultSize,
         generating: false,
         error: '',
@@ -1013,7 +1412,10 @@ const startPolling = (taskId, imageId) => {
           size: imageSize,
           generating: false,
           error: '',
-          taskId: null
+          taskId: null,
+          // 制作人：用后端返回的 creator 覆盖（后端是 source of truth），
+          // 避免异步任务创建占位记录时未带 creator 导致筛选不命中
+          creator: (result.image?.creator || image.creator || '').trim()
         })
 
         // 后端 query_task 路由已自动将图片落盘到 edit_folders + edit_thumbnails
@@ -1066,6 +1468,8 @@ const openConfirmDialog = (options) => {
 // 图片库数据在后台静默预加载，不阻塞页面渲染
 onMounted(async () => {
   try {
+    // 注册全局 mousedown 监听，实现点击 popover / 按钮外部时自动关闭
+    document.addEventListener('mousedown', handleDocumentMouseDown)
     loadBoardFromStorage()
     fetchEditImages()
 
@@ -1096,6 +1500,8 @@ onMounted(async () => {
 
 onUnmounted(() => {
   stopPolling()
+  // 卸载全局 mousedown 监听，避免组件销毁后仍响应点击
+  document.removeEventListener('mousedown', handleDocumentMouseDown)
 })
 
 watch(isAsync, async (newVal) => {
@@ -1109,13 +1515,21 @@ watch(isAsync, async (newVal) => {
 })
 
 // API 提供者变化时保存到 localStorage，并联动更新模型
+// APIYI 切换时强制 isAsync = true（视为异步执行，走后台线程任务卡）
 watch(selectedApiProvider, (val) => {
   saveEditViewPrefs({ selectedApiProvider: val })
+  if (val === 'apiyi') {
+    if (!APIYI_ASPECT_RATIO_OPTIONS.some(option => option.value === editAspectRatio.value)) {
+      editAspectRatio.value = 'auto'
+    }
+  }
   if (val === 'gptsapi') {
-    isAsync.value = false
     if (!gptsapiAspectRatioOptions.some(option => option.value === editAspectRatio.value)) {
       editAspectRatio.value = 'auto'
     }
+  }
+  if (val === 'apiyi') {
+    isAsync.value = true
   }
   if (!editModels.value.includes(selectedModel.value)) {
     selectedModel.value = editModels.value[0] || 'gpt-image-2'
@@ -1126,6 +1540,36 @@ watch(selectedApiProvider, (val) => {
 watch(selectedModel, (val) => {
   saveEditViewPrefs({ selectedModel: val })
 })
+
+// 制作人变化时保存到 localStorage，确保下次进入编辑页能恢复用户上次的选择
+watch(selectedCreator, (val) => {
+  saveEditViewPrefs({ creator: val || '' })
+})
+
+// EditBoard 工具栏中制作人筛选变更的处理函数
+// 功能描述：
+//     接收 EditBoard 抛出的 update:creator 事件，更新顶层 selectedCreator；
+//     watch(selectedCreator) 会自动把新值持久化到 editViewPrefs，
+//     下次进入编辑页时优先用此值（除非用户主动清空，则回退到生图页偏好）。
+// 实现逻辑：
+//     1. 直接覆盖 selectedCreator，保持工具栏与右侧编辑面板 Select 同步
+//     2. 不在此处手动调用 saveEditViewPrefs，避免双写；由 watch 统一负责
+const handleCreatorChange = (val) => {
+  selectedCreator.value = val || ''
+}
+
+// 制作人继承逻辑：
+//   1. 从图库选择（id 存在且非 local/edited/pending 前缀）→ 自动继承父图 creator
+//   2. 本地上传/临时图片 → 使用上次保存的偏好（强制用户重新确认或修改）
+watch(currentEditingImage, (img) => {
+  const fallbackCreator = savedEditViewPrefs.creator || savedImageGeneratorPrefs.creator || ''
+  if (img && img.id && !/^(local|edited|pending)-/.test(img.id)) {
+    const source = imageStore.images.find((x) => x.id === img.id)
+    selectedCreator.value = source?.creator || fallbackCreator
+  } else {
+    selectedCreator.value = fallbackCreator
+  }
+}, { immediate: true })
 
 watch(editModels, (nextModels) => {
   if (!nextModels.includes(selectedModel.value)) {
@@ -1142,7 +1586,7 @@ watch([editAspectRatio, selectedApiProvider], () => {
 watch(selectedImageId, () => {
   editPrompt.value = ''
   editAspectRatio.value = 'auto'
-  editResolution.value = isGptsapiProvider.value ? '1K' : '2K'
+  editResolution.value = usesCompactEditSizeOptions.value ? '1K' : '2K'
   editQuality.value = 'auto'
   showAnnotationModal.value = false
 })
@@ -1162,9 +1606,12 @@ watch(selectedImageId, () => {
             <span class="edit-view__section-title">上传图片</span>
           </div>
           <ImageUpload
+            :max-edge="GPT_IMAGE_MAX_EDGE"
+            :on-oversize="handleUploadOversize"
             @update:model-value="handleUploadComplete"
             @file-selected="handleFileSelected"
             @upload-complete="handleUploadComplete"
+            @compressed="handleUploadCompressed"
           />
         </div>
 
@@ -1228,8 +1675,10 @@ watch(selectedImageId, () => {
 
         <template v-else>
           <EditBoard
-            :images="boardImages"
+            :images="filteredBoardImages"
             :selected-id="selectedImageId"
+            :creator="selectedCreator"
+            :creator-options="filterCreatorOptions"
             @select="handleBoardCompare"
             @edit="handleBoardEdit"
             @delete="handleBoardDelete"
@@ -1238,6 +1687,9 @@ watch(selectedImageId, () => {
             @batchDelete="handleBatchDelete"
             @batchSave="handleBatchSave"
             @add-to-preparation="handleAddToPreparation"
+            @add-to-geo="handleAddToGeo"
+            @retry="handleBoardRetry"
+            @update:creator="handleCreatorChange"
           />
 
           <div v-if="boardImages.length === 0" class="edit-view__empty">
@@ -1271,7 +1723,7 @@ watch(selectedImageId, () => {
                   class="edit-view__toggle-switch"
                   :class="{ 'edit-view__toggle-switch--active': isAsync }"
                   @click="toggleAsync"
-                  :disabled="submitting || selectedApiProvider === 'gptsapi'"
+                  :disabled="submitting"
                 ></button>
                 <span :class="{ 'edit-view__mode-label--active': isAsync }">异步</span>
               </div>
@@ -1295,7 +1747,51 @@ watch(selectedImageId, () => {
                   编辑指令
                   <span class="edit-view__label-required">*</span>
                 </label>
-                <span class="edit-view__counter">{{ editPrompt.length }}/1000</span>
+                <div class="edit-view__field-actions">
+                  <span class="edit-view__counter">{{ editPrompt.length }}/1000</span>
+                  <button
+                    ref="snippetMenuButtonRef"
+                    type="button"
+                    class="edit-view__snippet-btn"
+                    :class="{ 'edit-view__snippet-btn--active': showSnippetMenu }"
+                    :disabled="submitting"
+                    title="从设置中选用预设片段"
+                    @click.stop="toggleSnippetMenu"
+                  >
+                    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                      <rect x="8" y="2" width="12" height="12" rx="2"></rect>
+                      <path d="M16 14H8a2 2 0 0 0-2 2v4a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2v-4a2 2 0 0 0-2-2z"></path>
+                    </svg>
+                    <span>片段</span>
+                  </button>
+                </div>
+                <!-- 编辑指令预设片段 popover：点击片段按钮时弹出 -->
+                <div
+                  v-if="showSnippetMenu"
+                  ref="snippetMenuPopoverRef"
+                  class="edit-view__snippet-popover"
+                  role="menu"
+                  @click.stop
+                >
+                  <div class="edit-view__snippet-popover-header">从设置中选择预设片段</div>
+                  <div v-if="!configStore.editPromptSnippets?.snippets?.length" class="edit-view__snippet-empty">
+                    暂无预设片段，请先在「设置 → 编辑指令预设」中添加
+                  </div>
+                  <ul v-else class="edit-view__snippet-list">
+                    <li
+                      v-for="snippet in configStore.editPromptSnippets.snippets"
+                      :key="snippet.id"
+                      class="edit-view__snippet-item"
+                      role="menuitem"
+                      tabindex="0"
+                      @click="appendSnippetToPrompt(snippet)"
+                      @keydown.enter.prevent="appendSnippetToPrompt(snippet)"
+                    >
+                      <div class="edit-view__snippet-item-name">{{ snippet.name || '未命名片段' }}</div>
+                      <div class="edit-view__snippet-item-preview">{{ snippet.content || '（空内容）' }}</div>
+                    </li>
+                  </ul>
+                </div>
               </div>
               <div class="edit-view__textarea-wrapper">
                 <textarea
@@ -1399,8 +1895,22 @@ watch(selectedImageId, () => {
                 </div>
               </div>
 
+              <!-- 制作人选择器 - 独立一行；本地属性，不发送到编辑 API，仅作为图片元数据保存到 images.creator -->
+              <div class="edit-view__selector-row edit-view__selector-row--full">
+                <div class="edit-view__selector">
+                  <label class="edit-view__label edit-view__label--select">制作人</label>
+                  <Select
+                    v-model="selectedCreator"
+                    :options="creatorOptions"
+                    :disabled="submitting"
+                    placeholder="选择制作人"
+                    wrapper-class="edit-view__select-wrapper"
+                  />
+                </div>
+              </div>
+
               <div class="edit-view__selector-row">
-                <div v-if="!isGptsapiProvider" class="edit-view__selector">
+                <div v-if="!isAsyncOnlyProvider || isApiyiProvider" class="edit-view__selector">
                   <label class="edit-view__label edit-view__label--select">模型</label>
                   <Select
                     v-model="selectedModel"
@@ -1425,7 +1935,7 @@ watch(selectedImageId, () => {
                 </div>
               </div>
               <div class="edit-view__selector-row">
-                <div v-if="!isGptsapiProvider" class="edit-view__selector">
+                <div v-if="!isGptsapiProvider && (!isApiyiProvider || isApiyiGptImage2)" class="edit-view__selector">
                   <label class="edit-view__label edit-view__label--select">
                     <svg class="edit-view__label-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
                       <path d="M12 2l3.09 6.26L22 9.27l-5 4.87 1.18 6.88L12 17.77l-6.18 3.25L7 14.14 2 9.27l6.91-1.01L12 2z"></path>
@@ -1438,7 +1948,7 @@ watch(selectedImageId, () => {
                     wrapper-class="edit-view__select-wrapper"
                   />
                 </div>
-                <div class="edit-view__selector">
+                <div v-if="!isApiyiGptImage2Vip" class="edit-view__selector">
                   <label class="edit-view__label edit-view__label--select">res</label>
                   <div class="edit-view__res-buttons">
                     <button
@@ -1455,7 +1965,7 @@ watch(selectedImageId, () => {
                 </div>
               </div>
 
-            <div v-if="!isGptsapiProvider" class="edit-view__selector-row">
+            <div v-if="!isAsyncOnlyProvider || isApiyiGptImage2" class="edit-view__selector-row">
               <div class="edit-view__selector">
                 <label class="edit-view__label edit-view__label--select">输出</label>
                 <Select
@@ -1464,10 +1974,18 @@ watch(selectedImageId, () => {
                   wrapper-class="edit-view__select-wrapper"
                 />
               </div>
+              <div v-if="isApiyiGptImage2" class="edit-view__selector">
+                <label class="edit-view__label edit-view__label--select">Moderation</label>
+                <Select
+                  v-model="editModeration"
+                  :options="moderationOptions"
+                  wrapper-class="edit-view__select-wrapper"
+                />
+              </div>
             </div>
 
             <div
-              v-if="!isGptsapiProvider && (editOutputFormat === 'jpeg' || editOutputFormat === 'webp')"
+              v-if="(!isAsyncOnlyProvider || isApiyiGptImage2) && (editOutputFormat === 'jpeg' || editOutputFormat === 'webp')"
               class="edit-view__compression-row"
             >
               <label class="edit-view__label">
@@ -1529,6 +2047,16 @@ watch(selectedImageId, () => {
       :cancel-text="confirmDialogConfig.cancelText"
       :danger="confirmDialogConfig.danger"
       @confirm="confirmDialogConfig.onConfirm"
+    />
+
+    <OptionDialog
+      v-model:visible="showResolutionDialog"
+      title="选择压缩分辨率"
+      :message="resolutionDialogMessage"
+      :options="resolutionDialogOptions"
+      cancel-text="取消上传"
+      @select="handleResolutionSelect"
+      @cancel="handleResolutionCancel"
     />
 
     <ImageCompare
@@ -1948,6 +2476,7 @@ watch(selectedImageId, () => {
   }
 
   &__field-header {
+    position: relative;
     display: flex;
     align-items: center;
     justify-content: space-between;
@@ -1988,6 +2517,130 @@ watch(selectedImageId, () => {
     font-size: 9px;
     color: $color-text-tertiary;
     font-variant-numeric: tabular-nums;
+  }
+
+  // 编辑指令 field-header 右侧 actions 容器：横向排布 counter 与片段按钮
+  &__field-actions {
+    display: flex;
+    align-items: center;
+    gap: $spacing-sm;
+  }
+
+  // 编辑指令预设片段按钮：与 reference-header 内的参考图按钮风格保持一致
+  &__snippet-btn {
+    display: inline-flex;
+    align-items: center;
+    gap: $spacing-xs;
+    padding: 2px $spacing-sm;
+    background: linear-gradient(135deg, rgba($color-primary, 0.1) 0%, rgba($color-primary, 0.05) 100%);
+    border: 1px solid rgba($color-primary, 0.2);
+    border-radius: $radius-md;
+    color: $color-primary;
+    font-size: 10px;
+    font-weight: 500;
+    cursor: pointer;
+    transition: all $transition-fast;
+    line-height: 1.4;
+
+    svg {
+      width: 12px;
+      height: 12px;
+    }
+
+    &:hover:not(:disabled) {
+      background: linear-gradient(135deg, rgba($color-primary, 0.18) 0%, rgba($color-primary, 0.1) 100%);
+      border-color: rgba($color-primary, 0.4);
+      transform: translateY(-1px);
+    }
+
+    &--active {
+      background: linear-gradient(135deg, $primary-gradient-start 0%, $primary-gradient-end 100%);
+      border-color: $color-primary;
+      color: $color-text-inverse;
+    }
+
+    &:disabled {
+      opacity: 0.5;
+      cursor: not-allowed;
+    }
+  }
+
+  // 编辑指令预设片段 popover：相对 field-header 右上角定位
+  // 关键样式：z-index 高于 textarea，背景不透明，阴影与圆角与项目其它 popover 一致
+  &__snippet-popover {
+    position: absolute;
+    top: calc(100% + 4px);
+    right: 0;
+    z-index: 50;
+    min-width: 240px;
+    max-width: 320px;
+    max-height: 280px;
+    overflow-y: auto;
+    background: $color-bg-card;
+    border: 1px solid $color-border;
+    border-radius: $radius-lg;
+    box-shadow: 0 12px 32px rgba(0, 0, 0, 0.12), 0 2px 8px rgba(0, 0, 0, 0.06);
+    padding: $spacing-xs 0;
+  }
+
+  &__snippet-popover-header {
+    padding: $spacing-xs $spacing-md;
+    font-size: 10px;
+    font-weight: 600;
+    color: $color-text-tertiary;
+    text-transform: uppercase;
+    letter-spacing: 0.05em;
+    border-bottom: 1px solid $color-border-light;
+  }
+
+  &__snippet-empty {
+    padding: $spacing-md;
+    font-size: 11px;
+    color: $color-text-tertiary;
+    line-height: 1.5;
+  }
+
+  &__snippet-list {
+    list-style: none;
+    margin: 0;
+    padding: 0;
+  }
+
+  &__snippet-item {
+    padding: $spacing-xs $spacing-md;
+    cursor: pointer;
+    border-bottom: 1px solid $color-border-light;
+    transition: background $transition-fast;
+
+    &:last-child {
+      border-bottom: none;
+    }
+
+    &:hover,
+    &:focus {
+      background: linear-gradient(135deg, rgba($color-primary, 0.08) 0%, rgba($color-primary, 0.03) 100%);
+      outline: none;
+    }
+  }
+
+  &__snippet-item-name {
+    font-size: 11px;
+    font-weight: 600;
+    color: $color-text-primary;
+    margin-bottom: 2px;
+  }
+
+  &__snippet-item-preview {
+    font-size: 10px;
+    color: $color-text-tertiary;
+    line-height: 1.4;
+    display: -webkit-box;
+    -webkit-line-clamp: 2;
+    -webkit-box-orient: vertical;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    word-break: break-all;
+    white-space: pre-wrap;
   }
 
   &__textarea-wrapper {
@@ -2237,3 +2890,4 @@ watch(selectedImageId, () => {
   }
 }
 </style>
+

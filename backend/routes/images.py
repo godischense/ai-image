@@ -3,6 +3,7 @@ import json
 import base64
 import mimetypes
 import re
+import uuid
 from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime
 import requests as requests_lib
@@ -10,6 +11,7 @@ from flask import Blueprint, request, jsonify, current_app
 from services.image_service import ImageService
 from services.fal_image_service import FalImageService
 from services.gptsapi_image_service import GptsApiImageService
+from services.apiyi_image_service import ApiyiImageService
 from services.file_upload_service import FileUploadService
 from services.download_service import download_image_to_local, delete_local_file
 from services.thumbnail_service import create_thumbnail_from_local
@@ -39,10 +41,117 @@ from services.folder_service import (
     rename_edit_folder
 )
 from models.config_model import get_single_config as get_db_single_config
+from services.auth_service import current_creator, current_user_is_admin, scoped_creator
+# APIYI 后台线程下载时复用 TaskProcessor 的幂等判断（已下载完成则跳过入队）
+from services.task_processor import _should_skip_enqueue
 
 images_bp = Blueprint('images', __name__)
 FINAL_TASK_STATUSES = {'SUCCESS', 'FAILURE'}
 THUMBNAIL_STATIC_PREFIX = '/api/static/generated_thumbnails/'
+
+# APIYI 异步任务专用 ThreadPoolExecutor
+# 功能描述：
+#     把 APIYI gpt-image-2-vip 同步请求（典型 90-150s）丢进后台线程执行，
+#     路由层立即返回 task_id 给前端，由 worker 在后台完成结果落库。
+# 实现逻辑：
+#     1. 模块级单例 executor，避免每次请求都新建池子
+#     2. max_workers=4 与 gptsapi 处理能力对齐，叠加 APIYI 出图较慢
+#     3. thread_name_prefix 便于日志定位
+# 异常处理：
+#     worker 内部 try/except 全部异常，标记 task FAILURE；
+#     executor 自身不抛错（任务失败通过返回值/异常体现）
+_apiyi_executor = ThreadPoolExecutor(max_workers=4, thread_name_prefix='apiyi-async')
+
+
+def _safe_delete_file(path: str) -> bool:
+    if not path or not os.path.isfile(path):
+        return False
+    try:
+        os.remove(path)
+        return True
+    except OSError as err:
+        print(f"[images] Warning: failed to delete old thumbnail {path}: {err}")
+        return False
+
+
+def _old_thumbnail_path_for_image(image_item) -> str:
+    image_type = getattr(image_item, 'image_type', 'generation') or 'generation'
+    if image_type == 'edit':
+        thumbnail_path = (getattr(image_item, 'thumbnail_path', None) or '').strip()
+        if thumbnail_path:
+            return thumbnail_path
+
+        thumbnail = (getattr(image_item, 'thumbnail', None) or '').strip()
+        if thumbnail.startswith(EDIT_THUMBNAIL_STATIC_PREFIX):
+            from services.edit_asset_service import EDIT_THUMBNAILS_DIR
+            filename = thumbnail.replace(EDIT_THUMBNAIL_STATIC_PREFIX, '', 1)
+            return os.path.join(EDIT_THUMBNAILS_DIR, filename)
+        return ''
+
+    return get_generated_thumbnail_file_path(image_item)
+
+
+def _repair_one_image_thumbnail_to_jpg(image_item) -> dict:
+    source_path = (getattr(image_item, 'local_path', None) or '').strip()
+    if not source_path or not os.path.isfile(source_path):
+        repair_image_file_reference(image_item)
+        source_path = (getattr(image_item, 'local_path', None) or '').strip()
+
+    if not source_path or not os.path.isfile(source_path):
+        return {'success': False, 'error': 'source image missing'}
+
+    old_thumbnail_path = _old_thumbnail_path_for_image(image_item)
+    image_type = getattr(image_item, 'image_type', 'generation') or 'generation'
+
+    if image_type == 'edit':
+        from services.edit_asset_service import create_edit_thumbnail_from_local
+        result = create_edit_thumbnail_from_local(source_path, getattr(image_item, 'folder_path', '') or '')
+    else:
+        result = create_thumbnail_from_local(source_path)
+
+    new_thumbnail_url = result.get('thumbnail_url', '')
+    new_thumbnail_path = result.get('thumbnail_path', '')
+    if not new_thumbnail_url or not new_thumbnail_path:
+        return {'success': False, 'error': 'thumbnail generation returned empty result'}
+
+    image_item.thumbnail = new_thumbnail_url
+    image_item.thumbnail_path = new_thumbnail_path
+    update_image(image_item)
+
+    if old_thumbnail_path and os.path.abspath(old_thumbnail_path) != os.path.abspath(new_thumbnail_path):
+        _safe_delete_file(old_thumbnail_path)
+
+    return {'success': True, 'thumbnail': new_thumbnail_url}
+
+
+def _repair_material_thumbnails_to_jpg() -> dict:
+    from services.material_service import MATERIAL_DIR, is_image_file
+    from services.material_thumbnail_service import create_material_thumbnail
+
+    processed = 0
+    succeeded = 0
+    failed = 0
+
+    if not os.path.isdir(MATERIAL_DIR):
+        return {'processed': 0, 'succeeded': 0, 'failed': 0}
+
+    for root, _, files in os.walk(MATERIAL_DIR):
+        for filename in files:
+            if not is_image_file(filename):
+                continue
+            processed += 1
+            source_path = os.path.join(root, filename)
+            try:
+                result = create_material_thumbnail(source_path)
+                if result.get('success') and str(result.get('filename', '')).lower().endswith('.jpg'):
+                    succeeded += 1
+                else:
+                    failed += 1
+            except Exception as err:
+                failed += 1
+                print(f"[images] Warning: failed to repair material thumbnail {source_path}: {err}")
+
+    return {'processed': processed, 'succeeded': succeeded, 'failed': failed}
 
 
 def get_generated_thumbnail_file_path(image_item) -> str:
@@ -91,13 +200,17 @@ def serialize_image(image_item):
     payload['display_url'] = resolved_url
     payload['imageType'] = image_item.image_type or 'generation'
     payload['taskId'] = image_item.task_id
-    # api_source: 始终根据模型名称判断
-    # gpt-image-2 / gpt-image-2-all 为 T8，openai/gpt-image-2 / openai/gpt-image-2/edit 为 fal
+    # api_source: prefer stored source, with model-prefix fallback for older rows.
     model_name = getattr(image_item, 'model', '') or ''
-    if model_name.startswith('openai/'):
+    stored_api_source = (getattr(image_item, 'api_source', None) or '').strip().lower()
+    if stored_api_source in {'fal', 'gptsapi', 'apiyi', 'openai', 't8'}:
+        payload['apiSource'] = 'openai' if stored_api_source == 't8' else stored_api_source
+    elif model_name.startswith('openai/'):
         payload['apiSource'] = 'fal'
     elif model_name.startswith('gptsapi/'):
         payload['apiSource'] = 'gptsapi'
+    elif model_name.startswith('apiyi/'):
+        payload['apiSource'] = 'apiyi'
     else:
         payload['apiSource'] = 'openai'
     # 确保 created_at 字段存在，用于排序
@@ -116,6 +229,15 @@ def get_inherited_poster_copy(parent_id):
     return (getattr(parent_image, 'poster_copy', '') or '') if parent_image else ''
 
 
+# 继承父图的制作人字段，用于编辑链路（未显式传入 creator 时回退到父图）
+# 当 parent_id 不存在或父图未找到时返回空字符串
+def get_inherited_creator(parent_id):
+    if not parent_id:
+        return ''
+    parent_image = get_image_by_id(parent_id)
+    return (getattr(parent_image, 'creator', '') or '') if parent_image else ''
+
+
 def build_edit_prompt_history(base_prompt, edit_prompt):
     base_prompt = (base_prompt or '').strip()
     edit_prompt = (edit_prompt or '').strip()
@@ -127,7 +249,7 @@ def build_edit_prompt_history(base_prompt, edit_prompt):
     parts.append(f'编辑{next_count}次')
     if edit_prompt:
         parts.append(edit_prompt)
-    return '\n'.join(parts)
+    return ' | '.join(parts)
 
 
 def build_edit_saved_prompt(parent_id, edit_prompt):
@@ -389,17 +511,29 @@ def build_thumbnail_for_local_image(local_path: str) -> str:
     return thumbnail_result.get('thumbnail_url', '')
 
 
-def prepare_generation_assets(image_url: str, existing_local_path: str = None) -> dict:
+def _creator_from_request(value: str = '') -> str:
+    return scoped_creator(value)
+
+
+def _image_scope_creator():
+    return None if current_user_is_admin() else current_creator()
+
+
+def _get_scoped_image_by_id(image_id: str):
+    return get_image_by_id(image_id, creator=_image_scope_creator())
+
+
+def prepare_generation_assets(image_url: str, existing_local_path: str = None, creator: str = '') -> dict:
     """
     准备普通生图资产
 
     功能描述：
         统一处理普通生图的原图下载与缩略图生成。
     """
-    return prepare_image_assets(image_url, existing_local_path)
+    return prepare_image_assets(image_url, existing_local_path, creator)
 
 
-def prepare_image_assets(image_url: str, existing_local_path: str = None) -> dict:
+def prepare_image_assets(image_url: str, existing_local_path: str = None, creator: str = '') -> dict:
     """
     准备原图与缩略图资产
 
@@ -418,7 +552,7 @@ def prepare_image_assets(image_url: str, existing_local_path: str = None) -> dic
     asset_error = ''
 
     if not resolved_local_path and resolved_url:
-        download_result = download_image_to_local(resolved_url)
+        download_result = download_image_to_local(resolved_url, creator=creator)
         resolved_local_path = download_result.get('local_path')
         original_display_url = download_result.get('local_url') or resolved_url
     elif resolved_local_path and os.path.exists(resolved_local_path):
@@ -558,14 +692,16 @@ def get_image_service() -> ImageService:
 
 # 获取 FalImageService 实例
 # 功能描述：
-#     从数据库/应用配置中读取 fal apiKey，创建 FalImageService 实例
-#     baseUrl 硬编码为 https://ai.t8star.cn/fal
+#     从数据库/应用配置中读取 fal apiKey 和 baseUrl，创建 FalImageService 实例
+#     baseUrl 来源：fal_api 配置 → 应用级 FAL_BASE_URL
+#     不再硬编码任何兜底值，配置缺失时由 FalImageService 构造时抛错
 def get_fal_image_service():
     fal_api_config = get_db_single_config('fal_api')
     api_key = fal_api_config.get('apiKey', '') or current_app.config.get('FAL_API_KEY', '')
+    base_url = fal_api_config.get('baseUrl', '') or current_app.config.get('FAL_BASE_URL', '')
     if not api_key:
         raise ValueError('FAL API Key 未配置，请先在设置页面填写')
-    return FalImageService(api_key=api_key)
+    return FalImageService(api_key=api_key, base_url=base_url)
 
 
 def get_gptsapi_image_service():
@@ -575,6 +711,68 @@ def get_gptsapi_image_service():
     if not api_key:
         raise ValueError('GPTsAPI API Key 未配置，请先在设置页面填写')
     return GptsApiImageService(api_key=api_key, base_url=base_url)
+
+
+# 获取 ApiyiImageService 实例
+# 功能描述：
+#     从数据库/应用配置中读取 apiyi apiKey 和 baseUrl，创建 ApiyiImageService 实例
+# 实现逻辑：
+#     1. 优先从数据库 apiyi_api 配置读取
+#     2. 缺失时回退到 app.config（由 config.py update_app_config 同步）
+#     3. baseUrl 默认值对齐文档主域名 https://api.apiyi.com
+# 异常处理：
+#     - apiKey 缺失时抛 ValueError，由上层路由返回 400
+def get_apiyi_image_service():
+    apiyi_config = get_db_single_config('apiyi_api')
+    api_key = apiyi_config.get('apiKey', '') or current_app.config.get('APIYI_API_KEY', '')
+    base_url = apiyi_config.get('baseUrl', '') or current_app.config.get('APIYI_BASE_URL', 'https://api.apiyi.com')
+    if not api_key:
+        raise ValueError('APIYI API Key 未配置，请先在设置页面填写')
+    return ApiyiImageService(api_key=api_key, base_url=base_url)
+
+
+def _normalize_apiyi_model(model: str) -> str:
+    raw = (model or 'gpt-image-2-vip').strip()
+    return raw.replace('apiyi/', '') or 'gpt-image-2-vip'
+
+
+def _apiyi_display_model(model: str) -> str:
+    return f"apiyi/{_normalize_apiyi_model(model)}"
+
+
+def _apiyi_gpt_image2_params(source) -> dict:
+    output_format = (source.get('output_format') or 'png').strip()
+    params = {
+        'quality': source.get('quality', 'auto'),
+        'output_format': output_format,
+        'background': 'auto',
+        'moderation': source.get('moderation', 'auto'),
+        'n': 1,
+    }
+    if output_format in {'jpeg', 'webp'}:
+        params['output_compression'] = source.get('output_compression', 100)
+    return params
+
+
+# 局部更新 image 记录
+# 功能描述：
+#     仅更新指定字段，避免重新查整行；
+#     用于 APIYI worker 异步场景下，不破坏并发安全。
+# 实现逻辑：
+#     1. 读取 image 记录（拿当前行作为基础）
+#     2. 用 fields 字典覆盖指定字段
+#     3. 调用 update_image 写回 DB
+# 异常处理：
+#     - image 不存在：静默跳过（worker 是后台任务，不应中断主流程）
+def update_image_local(image_id, fields: dict):
+    from models.image_model import get_image_by_id, update_image
+    image = get_image_by_id(image_id)
+    if not image:
+        print(f"[images] update_image_local: image {image_id} not found, skip")
+        return
+    for k, v in (fields or {}).items():
+        setattr(image, k, v)
+    update_image(image)
 
 
 # 获取 FileUploadService 实例
@@ -869,7 +1067,7 @@ def _extract_image_urls_from_result(result):
     return deduped
 
 
-def _save_gptsapi_generation_result(result, prompt, model, size, quality, poster_copy=''):
+def _save_gptsapi_generation_result(result, prompt, model, size, quality, poster_copy='', creator=''):
     image_urls = _extract_image_urls_from_result(result)
     if not image_urls:
         return None, [], 'GPTsAPI 未返回图片 URL'
@@ -878,7 +1076,7 @@ def _save_gptsapi_generation_result(result, prompt, model, size, quality, poster
     first_saved = None
     for idx, image_url in enumerate(image_urls):
         try:
-            asset_result = prepare_image_assets(image_url)
+            asset_result = prepare_image_assets(image_url, creator=creator)
         except (ValueError, RuntimeError) as err:
             print(f"[images] Warning: Failed to prepare GPTsAPI generated image [{idx}]: {err}")
             asset_result = {'url': image_url, 'thumbnail': '', 'local_path': None, 'thumbnail_path': None}
@@ -893,7 +1091,8 @@ def _save_gptsapi_generation_result(result, prompt, model, size, quality, poster
             local_path=asset_result.get('local_path'),
             thumbnail_path=asset_result.get('thumbnail_path'),
             image_type='generation',
-            poster_copy=poster_copy
+            poster_copy=poster_copy,
+            creator=creator
         )
         if first_saved is None:
             first_saved = saved_image
@@ -919,7 +1118,7 @@ def _enqueue_gptsapi_image_download(saved_image, image_url, image_type='generati
 
 
 
-def _save_gptsapi_edit_result(result, prompt, model, size, quality, parent_id):
+def _save_gptsapi_edit_result(result, prompt, model, size, quality, parent_id, creator=''):
     image_urls = _extract_image_urls_from_result(result)
     if not image_urls:
         return None, 'GPTsAPI 未返回图片 URL'
@@ -937,7 +1136,7 @@ def _save_gptsapi_edit_result(result, prompt, model, size, quality, parent_id):
 
     image_url = image_urls[0]
     try:
-        asset_result = save_edit_result_directly(image_url, prompt, size)
+        asset_result = save_edit_result_directly(image_url, prompt, size, creator=effective_creator)
     except (ValueError, RuntimeError) as err:
         print(f"[images] Warning: Failed to save GPTsAPI edit assets: {err}")
         asset_result = {
@@ -947,6 +1146,9 @@ def _save_gptsapi_edit_result(result, prompt, model, size, quality, parent_id):
             'local_path': None,
             'thumbnail_path': None
         }
+
+    # 编辑链路优先使用显式传入的 creator，否则从父图继承
+    effective_creator = creator or get_inherited_creator(parent_id)
 
     saved_image = add_image(
         url=asset_result.get('display_url') or asset_result.get('url', image_url),
@@ -960,7 +1162,8 @@ def _save_gptsapi_edit_result(result, prompt, model, size, quality, parent_id):
         parent_id=parent_id,
         folder_path='',
         image_type='edit',
-        poster_copy=get_inherited_poster_copy(parent_id)
+        poster_copy=get_inherited_poster_copy(parent_id),
+        creator=effective_creator
     )
 
     if parent_id:
@@ -991,6 +1194,8 @@ def _handle_gptsapi_generation(data, prompt, model, size, quality):
     resolution = data.get('resolution', '2K')
     local_async = bool(data.get('async', False))
     poster_copy = (data.get('poster_copy') or '').strip()
+    # 制作人：仅作为本地元数据，不发送到 API
+    creator = _creator_from_request(data.get('creator'))
 
     image = data.get('image')
     input_urls = []
@@ -1036,7 +1241,8 @@ def _handle_gptsapi_generation(data, prompt, model, size, quality):
             task_id=task_id,
             image_type='generation',
             api_source='gptsapi',
-            poster_copy=poster_copy
+            poster_copy=poster_copy,
+            creator=creator
         )
 
         add_task(
@@ -1050,8 +1256,11 @@ def _handle_gptsapi_generation(data, prompt, model, size, quality):
                 'model': model,
                 'prompt': prompt,
                 'size': size,
+                'aspect_ratio': aspect_ratio,
+                'resolution': resolution,
                 'quality': quality,
-                'raw_create_result': create_result.get('raw_response', {})
+                'raw_create_result': create_result.get('raw_response', {}),
+                'creator': creator
             }
         )
 
@@ -1079,7 +1288,7 @@ def _handle_gptsapi_generation(data, prompt, model, size, quality):
     if 'error' in result:
         return jsonify(result), 500
 
-    first_saved, all_images, error = _save_gptsapi_generation_result(result, prompt, model, size, quality, poster_copy)
+    first_saved, all_images, error = _save_gptsapi_generation_result(result, prompt, model, size, quality, poster_copy, creator)
     if error:
         return jsonify({'error': error, 'raw_result': result}), 500
 
@@ -1090,12 +1299,165 @@ def _handle_gptsapi_generation(data, prompt, model, size, quality):
     }), 200
 
 
+# APIYI 异步生图处理
+# 功能描述：
+#     按文档调用 {base_url}/v1/images/generations 同步接口（gpt-image-2-vip），
+#     立即生成 task_id 入库，把同步调用丢进 ThreadPoolExecutor，
+#     立即返回 202 + task_id 给前端。前端走统一任务卡轮询。
+# 实现逻辑：
+#     1. 校验 apiKey；模型固定为 gpt-image-2-vip（强制覆盖前端传入）
+#     2. 创建占位 image 记录、task 记录（status=IN_PROGRESS, api_source='apiyi'）
+#     3. 提交 _apiyi_executor.submit(worker) 异步执行
+#     4. 后台 worker 完成时：解析 b64_json/url → 下载/转存 → 更新 image 与 task
+#     5. 不在前端做同步等待，与用户「异步执行=并行发送请求」要求一致
+# 异常处理：
+#     - 无 apiKey：返回 400，不入 task
+#     - 后台执行异常：worker 内部捕获，标记 task FAILURE + 写入 fail_reason
+def _handle_apiyi_generation(data, prompt, model, size, quality):
+    if not prompt:
+        return jsonify({'error': 'Prompt is required'}), 400
+
+    try:
+        service = get_apiyi_image_service()
+    except ValueError as err:
+        return jsonify({'error': str(err)}), 400
+
+    api_model = _normalize_apiyi_model(model)
+    actual_model = _apiyi_display_model(api_model)
+    if api_model == 'gpt-image-2':
+        actual_size = size or '1024x1024'
+        request_params = _apiyi_gpt_image2_params(data)
+    else:
+        # size 透传：仅当含 'x' 时认为是 30 档之一，否则回退 'auto'（与文档默认值对齐）
+        actual_size = size if (not size or 'x' in str(size).lower()) else 'auto'
+        request_params = {}
+    # 文档默认 response_format=b64_json，避免 url 24h 过期
+    response_format = data.get('response_format', 'b64_json')
+    poster_copy = (data.get('poster_copy') or '').strip()
+    # 制作人：仅作为本地元数据，不发送到 API
+    creator = _creator_from_request(data.get('creator'))
+
+    # 提取参考图（已由 generate_image 路由的 _normalize_reference_images 标准化）
+    # APIYI 的 /v1/images/generations 文生图端点不支持传入图片，
+    # 有参考图时必须改用 /v1/images/edits 编辑端点（multipart 方式上传本地文件）
+    ref_images = data.get('image')
+    has_ref_images = bool(ref_images and isinstance(ref_images, list) and len(ref_images) > 0)
+
+    # 有参考图时，下载 URL/base64 到临时文件供 multipart 上传
+    temp_dir = None
+    image_paths = []
+    if has_ref_images:
+        temp_dir = os.path.join(os.path.dirname(os.path.dirname(__file__)), 'temp')
+        os.makedirs(temp_dir, exist_ok=True)
+        try:
+            for idx, img_url in enumerate(ref_images):
+                if not isinstance(img_url, str):
+                    continue
+                try:
+                    if img_url.startswith('data:'):
+                        # base64 Data URL → 直接解码
+                        header, b64_part = img_url.split(',', 1)
+                        img_bytes = base64.b64decode(b64_part)
+                    else:
+                        # HTTP/HTTPS URL → 下载
+                        resp = requests_lib.get(img_url, timeout=30)
+                        resp.raise_for_status()
+                        img_bytes = resp.content
+                except Exception as e:
+                    print(f"[apiyi_gen] 下载参考图 {idx} ({str(img_url)[:80]}) 失败: {e}")
+                    continue
+                file_path = os.path.join(temp_dir, f'{uuid.uuid4()}_ref_{idx}.png')
+                with open(file_path, 'wb') as f:
+                    f.write(img_bytes)
+                # 长边 3840px 等比缩小（与 _handle_apiyi_edit 对齐，文档建议 ≤1.5MB）
+                from services.image_processor import ImageDataProcessor
+                downscaled, down_err = ImageDataProcessor.downscale_image(file_path, 3840)
+                if down_err:
+                    print(f"[apiyi_gen] downscale ref image {idx} warning: {down_err}")
+                elif downscaled != file_path:
+                    image_paths.append(downscaled)
+                else:
+                    image_paths.append(file_path)
+        except Exception as e:
+            for p in image_paths:
+                try:
+                    if os.path.exists(p):
+                        os.remove(p)
+                except OSError:
+                    pass
+            return jsonify({'error': f'参考图下载失败: {e}'}), 500
+
+    task_id = str(uuid.uuid4())
+    saved_image = add_image(
+        url='',
+        thumbnail='',
+        prompt=prompt,
+        model=actual_model,
+        size=actual_size,
+        quality=request_params.get('quality', '') if api_model == 'gpt-image-2' else '',
+        task_id=task_id,
+        image_type='generation',
+        api_source='apiyi',
+        poster_copy=poster_copy,
+        creator=creator
+    )
+
+    add_task(
+        task_id=task_id,
+        image_id=saved_image.id,
+        platform='apiyi',
+        status='IN_PROGRESS',
+        api_source='apiyi',
+        data={
+            'api_source': 'apiyi',
+            'model': api_model,
+            'prompt': prompt,
+            'size': actual_size,
+            'response_format': response_format,
+            'request_params': request_params,
+            'has_ref_images': has_ref_images,
+            'ref_image_count': len(image_paths) if has_ref_images else 0,
+            'creator': creator
+        }
+    )
+
+    # 闭包捕获：worker 在独立线程中运行，需重新获取 application context
+    app_obj = current_app._get_current_object()
+
+    # 把原 _worker 闭包逻辑抽到 services.apiyi_async_workers，复用于 retry
+    from services.apiyi_async_workers import run_apiyi_generation_worker
+    _apiyi_executor.submit(
+        run_apiyi_generation_worker,
+        app_obj,
+        service,
+        task_id,
+        saved_image,
+        image_paths,
+        prompt,
+        actual_size,
+        response_format,
+        has_ref_images,
+        api_model,
+        request_params,
+    )
+
+    saved_image = get_image_by_id(saved_image.id) or saved_image
+    print(f"[images] APIYI generation async submitted: task_id={task_id}, image_id={saved_image.id}, has_ref_images={has_ref_images}, ref_count={len(image_paths)}")
+    return jsonify({
+        'status': 'pending',
+        'task_id': task_id,
+        'image': serialize_image(saved_image)
+    }), 202
+
+
 @images_bp.route('/api/images/generations', methods=['POST'])
 def generate_image():
     data = request.get_json()
 
     prompt = data.get('prompt')
     poster_copy = (data.get('poster_copy') or '').strip()
+    # 制作人：仅作为本地元数据，不发送到 API
+    creator = _creator_from_request(data.get('creator'))
     model = data.get('model', 'gpt-image-2')
     size = data.get('size', '1024x1024')
     quality = data.get('quality', 'auto')
@@ -1111,8 +1473,22 @@ def generate_image():
     # 将参考图中的HTTP URL统一转换为base64 Data URL，确保第三方API能正确识别
     if image and isinstance(image, list):
         image = _normalize_reference_images(image)
+        data['image'] = image  # 将标准化后的参考图写回 data，确保下游 handler 拿到标准化值
 
     api_provider = data.get('api_provider', 'openai')
+    try:
+        print(
+            "[images] SEND generation request "
+            f"api={api_provider} model={model} size={size} quality={quality} "
+            f"async={async_mode} prompt_len={len(prompt or '')} "
+            f"reference_count={len(image) if isinstance(image, list) else 0}"
+        )
+    except Exception:
+        pass
+
+    # APIYI 异步生图分支（gpt-image-2-vip，按文档走后台线程执行）
+    if api_provider == 'apiyi':
+        return _handle_apiyi_generation(data, prompt, model, size, quality)
 
     # Fal API 生图分支
     if api_provider == 'fal':
@@ -1151,6 +1527,7 @@ def generate_image():
                 'error': '异步图片生成接口未返回 task_id，无法继续跟踪任务'
             }), 502
 
+        # 制作人：随生图请求上传到后端，写入 images.creator，保证刷新和 GEO 复制时不会丢
         saved_image = add_image(
             url='',
             thumbnail='',
@@ -1160,7 +1537,8 @@ def generate_image():
             quality=quality,
             task_id=task_id,
             image_type='generation',
-            poster_copy=poster_copy
+            poster_copy=poster_copy,
+            creator=creator
         )
 
         add_task(
@@ -1174,7 +1552,8 @@ def generate_image():
                 'n': n,
                 'seed': seed,
                 'output_format': output_format,
-                'output_compression': output_compression
+                'output_compression': output_compression,
+                'creator': creator
             }
         )
 
@@ -1208,7 +1587,7 @@ def generate_image():
 
             if image_url:
                 try:
-                    asset_result = prepare_image_assets(image_url)
+                    asset_result = prepare_image_assets(image_url, creator=creator)
                 except (ValueError, RuntimeError) as err:
                     print(f"[images] Warning: Failed to prepare assets for generated image [{idx}]: {err}")
 
@@ -1222,7 +1601,8 @@ def generate_image():
                 local_path=asset_result.get('local_path'),
                 thumbnail_path=asset_result.get('thumbnail_path'),
                 image_type='generation',
-                poster_copy=poster_copy
+                poster_copy=poster_copy,
+                creator=creator
             )
 
             if idx == 0:
@@ -1267,6 +1647,8 @@ def _handle_fal_generation(data, prompt, model, size, quality):
     seed = data.get('seed', 0)
     skip_error = data.get('skip_error', False)
     poster_copy = (data.get('poster_copy') or '').strip()
+    # 制作人：仅作为本地元数据，不发送到 fal API
+    creator = _creator_from_request(data.get('creator'))
 
     # 参考图：优先使用前端已上传的 HTTP URL，base64 则尝试上传到 /v1/files
     image_urls = None
@@ -1300,6 +1682,12 @@ def _handle_fal_generation(data, prompt, model, size, quality):
                     return jsonify({'error': f'参考图 {idx+1} 处理失败: {str(e)}'}), 500
             else:
                 image_urls.append(img_str)
+
+    # 自动切换模型：有参考图时使用 /edit 端点，否则使用基础模型
+    # 前端固定传 openai/gpt-image-2，后端根据参考图自动决定是否加 /edit
+    if image_urls:
+        model = model + '/edit'
+        print(f"[images] Fal gen auto-switched to edit model: {model}")
 
     # 调用 fal 服务提交生图请求
     # 始终使用 queue 模式（sync_mode=False），与 fal 官方文档保持一致
@@ -1341,7 +1729,7 @@ def _handle_fal_generation(data, prompt, model, size, quality):
                 print(f"[images] Fal sync direct result: image[{idx}] has no URL, skipping")
                 continue
 
-            asset_result = prepare_image_assets(image_url)
+            asset_result = prepare_image_assets(image_url, creator=creator)
             saved_image = add_image(
                 url=asset_result.get('url', image_url),
                 thumbnail=asset_result.get('thumbnail', ''),
@@ -1352,7 +1740,8 @@ def _handle_fal_generation(data, prompt, model, size, quality):
                 local_path=asset_result.get('local_path'),
                 thumbnail_path=asset_result.get('thumbnail_path'),
                 image_type='generation',
-                poster_copy=poster_copy
+                poster_copy=poster_copy,
+                creator=creator
             )
 
             if idx == 0:
@@ -1385,6 +1774,7 @@ def _handle_fal_generation(data, prompt, model, size, quality):
     # 异步模式：返回 task_id，由 TaskProcessor 后台轮询
     if is_async:
         # 创建图片记录
+        # 制作人：随生图请求上传到后端，写入 images.creator，保证刷新和 GEO 复制时不会丢
         saved_image = add_image(
             url='',
             thumbnail='',
@@ -1394,10 +1784,12 @@ def _handle_fal_generation(data, prompt, model, size, quality):
             quality=quality,
             task_id=request_id,
             image_type='generation',
-            poster_copy=poster_copy
+            poster_copy=poster_copy,
+            creator=creator
         )
 
         # 创建任务记录，标记 api_source='fal'，存储 model 和 response_url 供后续轮询使用
+        # creator 同步写入 data 字典，TaskProcessor 在补建额外图时可直接取用
         add_task(
             task_id=request_id,
             image_id=saved_image.id,
@@ -1407,7 +1799,8 @@ def _handle_fal_generation(data, prompt, model, size, quality):
                 'api_source': 'fal',
                 'model': model,
                 'response_url': response_url,
-                'raw_create_result': result
+                'raw_create_result': result,
+                'creator': creator
             }
         )
 
@@ -1494,7 +1887,8 @@ def _handle_fal_generation(data, prompt, model, size, quality):
             continue
 
         # 与 OpenAI sync 一样：下载到本地，保存记录
-        asset_result = prepare_image_assets(image_url)
+        # 制作人：随生图请求上传到后端，写入 images.creator，保证刷新和 GEO 复制时不会丢
+        asset_result = prepare_image_assets(image_url, creator=creator)
         saved_image = add_image(
             url=asset_result.get('url', image_url),
             thumbnail=asset_result.get('thumbnail', ''),
@@ -1505,7 +1899,8 @@ def _handle_fal_generation(data, prompt, model, size, quality):
             local_path=asset_result.get('local_path'),
             thumbnail_path=asset_result.get('thumbnail_path'),
             image_type='generation',
-            poster_copy=poster_copy
+            poster_copy=poster_copy,
+            creator=creator
         )
 
         if idx == 0:
@@ -1526,7 +1921,7 @@ def _handle_fal_generation(data, prompt, model, size, quality):
     }), 200
 
 
-def _handle_gptsapi_edit(request, prompt, image_file, reference_files, model, size, quality, parent_id, async_mode=False):
+def _handle_gptsapi_edit(request, prompt, image_file, reference_files, model, size, quality, parent_id, async_mode=False, creator=''):
     if not prompt:
         return jsonify({'error': 'Prompt is required'}), 400
 
@@ -1599,7 +1994,9 @@ def _handle_gptsapi_edit(request, prompt, image_file, reference_files, model, si
             parent_id=parent_id,
             folder_path='',
             image_type='edit',
-            poster_copy=get_inherited_poster_copy(parent_id)
+            poster_copy=get_inherited_poster_copy(parent_id),
+            # 制作人：异步任务占位记录写入 images.creator，TaskProcessor 落盘结果时沿用同一 image_id
+            creator=creator
         )
 
         if parent_id:
@@ -1627,7 +2024,9 @@ def _handle_gptsapi_edit(request, prompt, image_file, reference_files, model, si
                 'size': size,
                 'quality': quality,
                 'parent_id': parent_id,
-                'raw_create_result': create_result.get('raw_response', {})
+                'raw_create_result': create_result.get('raw_response', {}),
+                # 制作人：随任务数据透传，TaskProcessor 落盘结果时优先读取此字段
+                'creator': creator
             }
         )
 
@@ -1650,7 +2049,7 @@ def _handle_gptsapi_edit(request, prompt, image_file, reference_files, model, si
     if 'error' in result:
         return jsonify(result), 500
 
-    saved_image, error = _save_gptsapi_edit_result(result, prompt, model, size, quality, parent_id)
+    saved_image, error = _save_gptsapi_edit_result(result, prompt, model, size, quality, parent_id, creator=creator)
     if error:
         return jsonify({'error': error, 'raw_result': result}), 500
 
@@ -1658,6 +2057,190 @@ def _handle_gptsapi_edit(request, prompt, image_file, reference_files, model, si
         'status': 'success',
         'image': serialize_image(saved_image)
     }), 200
+
+
+# APIYI 异步图片编辑处理
+# 功能描述：
+#     按文档调用 {base_url}/v1/images/edits 同步接口（gpt-image-2-vip），
+#     立即生成 task_id 入库，把 multipart 上传 + 同步调用丢进 ThreadPoolExecutor，
+#     立即返回 202 + task_id 给前端。前端走统一任务卡轮询。
+# 实现逻辑：
+#     1. 校验 apiKey / prompt / 至少一张输入图
+#     2. 将上传文件保存到 temp 目录（统一走 downscale_image 3840px 压缩）
+#     3. 创建占位 image 记录（image_type='edit'）、task 记录（api_source='apiyi'）
+#     4. 建立 edit_relation（如果 parent_id 存在）
+#     5. 提交 _apiyi_executor.submit(worker) 异步执行
+#     6. worker 完成后清理 temp 文件，更新 image 与 task
+#     7. 默认 size='auto'（文档：编辑场景推荐 auto，跟随 prompt 中点名要修改的图比例）
+# 异常处理：
+#     - prompt 缺失 / 输入图为空：返回 400，不入 task
+#     - apiKey 缺失：返回 400，不入 task
+#     - 后台执行异常：worker 内部捕获，标记 task FAILURE + 写入 fail_reason
+def _handle_apiyi_edit(request, prompt, image_file, mask_file, reference_files, model, size, quality, parent_id, creator=''):
+    if not prompt:
+        return jsonify({'error': 'Prompt is required'}), 400
+    if not image_file:
+        return jsonify({'error': 'APIYI 编辑需要至少一张输入图片'}), 400
+
+    try:
+        service = get_apiyi_image_service()
+    except ValueError as err:
+        return jsonify({'error': str(err)}), 400
+
+    api_model = _normalize_apiyi_model(model)
+    actual_model = _apiyi_display_model(api_model)
+    if api_model == 'gpt-image-2':
+        actual_size = size or '1024x1024'
+        request_params = _apiyi_gpt_image2_params(request.form)
+    else:
+        # 按旧模型文档；编辑场景 size 推荐 'auto'（跟随 prompt 点名的图比例）
+        actual_size = size if (size and 'x' in str(size).lower()) else 'auto'
+        request_params = {}
+    response_format = request.form.get('response_format', 'b64_json')
+
+    # 临时目录用于存放上传的主图与参考图（与 fal 路径对齐）
+    temp_dir = os.path.join(os.path.dirname(os.path.dirname(__file__)), 'temp')
+    os.makedirs(temp_dir, exist_ok=True)
+    image_path = None
+    mask_path = None
+    reference_paths = []
+
+    try:
+        if image_file:
+            image_path = os.path.join(temp_dir, f'{uuid.uuid4()}_image.png')
+            image_file.save(image_path)
+            # 长边 3840px 等比缩小（与 gptsapi/fal 编辑一致）
+            from services.image_processor import ImageDataProcessor
+            downscaled, down_err = ImageDataProcessor.downscale_image(image_path, 3840)
+            if down_err:
+                print(f"[apiyi_edit] downscale main image warning: {down_err}")
+            elif downscaled != image_path:
+                image_path = downscaled
+
+        if api_model == 'gpt-image-2' and mask_file:
+            mask_path = os.path.join(temp_dir, f'{uuid.uuid4()}_mask.png')
+            mask_file.save(mask_path)
+
+        for ref in reference_files:
+            ref_path = os.path.join(temp_dir, f'{uuid.uuid4()}_ref.png')
+            ref.save(ref_path)
+            from services.image_processor import ImageDataProcessor
+            downscaled_ref, ref_err = ImageDataProcessor.downscale_image(ref_path, 3840)
+            if ref_err:
+                print(f"[apiyi_edit] downscale ref image warning: {ref_err}")
+            elif downscaled_ref != ref_path:
+                reference_paths.append(downscaled_ref)
+            else:
+                reference_paths.append(ref_path)
+    except Exception as save_err:
+        # 临时文件保存失败时清理已写入文件
+        for p in [image_path, mask_path] + reference_paths:
+            try:
+                if p and os.path.exists(p):
+                    os.remove(p)
+            except OSError:
+                pass
+        return jsonify({'error': f'编辑图保存失败: {save_err}'}), 500
+
+    # 按上传顺序拼接 image_paths：主图 + 参考图，对应 prompt 中「图1/图2/...」
+    image_paths = []
+    if image_path:
+        image_paths.append(image_path)
+    image_paths.extend(reference_paths)
+
+    # 编辑关系：与 gptsapi edit 一致
+    root_id = None
+    depth = 0
+    if parent_id:
+        parent_relation = get_edit_relation_by_image_id(parent_id)
+        if parent_relation:
+            root_id = parent_relation.get('root_id')
+            depth = parent_relation.get('depth', 0) + 1
+        else:
+            root_id = parent_id
+            depth = 1
+        # 没指定 size 时继承父图尺寸
+        if not size:
+            parent_image = get_image_by_id(parent_id)
+            if parent_image and parent_image.size:
+                actual_size = parent_image.size
+
+    task_id = str(uuid.uuid4())
+    saved_image = add_image(
+        url='',
+        thumbnail='',
+        prompt=build_edit_saved_prompt(parent_id, prompt),
+        model=actual_model,
+        size=actual_size,
+        quality=request_params.get('quality', '') if api_model == 'gpt-image-2' else '',
+        task_id=task_id,
+        parent_id=parent_id,
+        folder_path='',
+        image_type='edit',
+        api_source='apiyi',
+        poster_copy=get_inherited_poster_copy(parent_id),
+        # 制作人：APIYI 后台 worker 落盘时不会重复设置 creator，
+        # 此处写入 images.creator 后，刷新页面时该字段会被返回
+        creator=creator
+    )
+
+    if parent_id:
+        if not root_id:
+            root_id = parent_id
+        add_edit_relation(
+            image_id=saved_image.id,
+            parent_id=parent_id,
+            root_id=root_id,
+            depth=depth
+        )
+
+    add_task(
+        task_id=task_id,
+        image_id=saved_image.id,
+        platform='apiyi',
+        status='IN_PROGRESS',
+        api_source='apiyi',
+        data={
+            'api_source': 'apiyi',
+            'model': api_model,
+            'prompt': prompt,
+            'size': actual_size,
+            'response_format': response_format,
+            'request_params': request_params,
+            'parent_id': parent_id,
+            'image_paths': image_paths,
+            'mask_path': mask_path,
+            # 制作人：随任务数据透传，run_apiyi_edit_worker 落盘时优先读取此字段
+            'creator': creator
+        }
+    )
+
+    app_obj = current_app._get_current_object()
+
+    # 把原 _worker 闭包逻辑抽到 services.apiyi_async_workers，复用于 retry
+    from services.apiyi_async_workers import run_apiyi_edit_worker
+    _apiyi_executor.submit(
+        run_apiyi_edit_worker,
+        app_obj,
+        service,
+        task_id,
+        saved_image,
+        image_paths,
+        prompt,
+        actual_size,
+        response_format,
+        api_model,
+        request_params,
+        mask_path,
+    )
+
+    saved_image = get_image_by_id(saved_image.id) or saved_image
+    print(f"[images] APIYI edit async submitted: task_id={task_id}, image_id={saved_image.id}")
+    return jsonify({
+        'status': 'pending',
+        'task_id': task_id,
+        'image': serialize_image(saved_image)
+    }), 202
 
 
 @images_bp.route('/api/images/edits', methods=['POST'])
@@ -1672,6 +2255,10 @@ def edit_image():
     quality = request.form.get('quality', 'auto')
     response_format = request.form.get('response_format', 'url')
     parent_id = request.form.get('parent_id')
+    if parent_id and not current_user_is_admin():
+        parent_image_for_access = get_image_by_id(parent_id, creator=current_creator())
+        if not parent_image_for_access:
+            return jsonify({'error': '无权限'}), 403
     async_mode = str(request.args.get('async', '')).lower() == 'true'
     n = int(request.form.get('n', 1))
     seed = int(request.form.get('seed', 0))
@@ -1679,6 +2266,11 @@ def edit_image():
     background = request.form.get('background', 'auto')
     output_format = request.form.get('output_format', 'png')
     api_provider = request.form.get('api_provider', 'openai')
+    # 制作人：随编辑请求上传到后端，写入 images.creator
+    # 与生图链路对齐（参考 routes/images.py 中 generate_image 路由读取 data.get('creator') 的实现）
+    # 优先级：表单值 > 父图继承值（保持编辑链路一致，避免每次编辑都丢失制作人）
+    raw_creator = (request.form.get('creator') or '').strip()
+    creator = _creator_from_request(raw_creator or get_inherited_creator(parent_id))
 
     # 前端诊断：参考图计数
     diagnostic_ref_count = request.form.get('_diagnostic_ref_count', 'not_sent')
@@ -1687,15 +2279,20 @@ def edit_image():
         f"size={size}, quality={quality}, parent_id={parent_id}, "
         f"n={n}, seed={seed}, output_format={output_format}, "
         f"has_image={bool(image_file)}, has_mask={bool(mask_file)}, "
-        f"reference_count={len(reference_files)}, diagnostic_ref_count={diagnostic_ref_count}"
+        f"reference_count={len(reference_files)}, diagnostic_ref_count={diagnostic_ref_count}, "
+        f"creator='{creator}'"
     )
 
     # Fal API 编辑分支
     if api_provider == 'fal':
-        return _handle_fal_edit(request, prompt, image_file, mask_file, reference_files, model, size, quality, parent_id)
+        return _handle_fal_edit(request, prompt, image_file, mask_file, reference_files, model, size, quality, parent_id, creator)
 
     if api_provider == 'gptsapi':
-        return _handle_gptsapi_edit(request, prompt, image_file, reference_files, model, size, quality, parent_id, async_mode)
+        return _handle_gptsapi_edit(request, prompt, image_file, reference_files, model, size, quality, parent_id, async_mode, creator)
+
+    # APIYI 编辑分支（gpt-image-2-vip，走后台线程异步执行）
+    if api_provider == 'apiyi':
+        return _handle_apiyi_edit(request, prompt, image_file, mask_file, reference_files, model, size, quality, parent_id, creator)
 
     if not prompt:
         return jsonify({'error': 'Prompt is required'}), 400
@@ -1833,7 +2430,9 @@ def edit_image():
             parent_id=parent_id,
             folder_path='',
             image_type='edit',
-            poster_copy=get_inherited_poster_copy(parent_id)
+            poster_copy=get_inherited_poster_copy(parent_id),
+            # 制作人：写入 images.creator，保证编辑画板筛选能命中本张图
+            creator=creator
         )
 
         if parent_id:
@@ -1878,7 +2477,11 @@ def edit_image():
         from services.image_processor import ImageDataProcessor
         cleaned_b64 = ImageDataProcessor.strip_b64_prefix(b64_json)
         output_dir = ImageDataProcessor.get_output_dir()
-        local_path, static_url, b64_err = ImageDataProcessor.save_b64_image(cleaned_b64, output_dir, f"edit_sync")
+        # 把用户选择的 output_format 透传给 save_b64_image，
+        # 让落盘扩展名与实际格式一致（避免 JPEG 内容被存成 .png）
+        local_path, static_url, b64_err = ImageDataProcessor.save_b64_image(
+            cleaned_b64, output_dir, f"edit_sync", output_format
+        )
         if b64_err:
             print(f"[images] Sync edit b64_json save failed: {b64_err}")
         else:
@@ -1895,7 +2498,7 @@ def edit_image():
 
     if image_url:
         try:
-            asset_result = save_edit_result_directly(image_url, prompt, size)
+            asset_result = save_edit_result_directly(image_url, prompt, size, creator=creator)
         except (ValueError, RuntimeError) as err:
             print(f"[images] Warning: Failed to save edit assets: {err}")
             asset_result['error'] = str(err)
@@ -1912,7 +2515,9 @@ def edit_image():
         parent_id=parent_id,
         folder_path='',
         image_type='edit',
-        poster_copy=get_inherited_poster_copy(parent_id)
+        poster_copy=get_inherited_poster_copy(parent_id),
+        # 制作人：同步编辑结果写入 images.creator，确保画板筛选可用
+        creator=creator
     )
 
     # 添加编辑关系
@@ -1944,7 +2549,7 @@ def edit_image():
 #     4. 提交后先检查 result 是否直接包含 images（API 同步模式直接返回）
 #     5. 异步模式：创建任务和图片记录后返回，存储 response_url 供轮询
 #     6. skip_error=True 时，失败不抛错，返回空占位结果
-def _handle_fal_edit(request, prompt, image_file, mask_file, reference_files, model, size, quality, parent_id):
+def _handle_fal_edit(request, prompt, image_file, mask_file, reference_files, model, size, quality, parent_id, creator=''):
     try:
         fal_service = get_fal_image_service()
     except ValueError as e:
@@ -2012,17 +2617,21 @@ def _handle_fal_edit(request, prompt, image_file, mask_file, reference_files, mo
     print(f"[FalEdit] mask_image_url={'YES' if mask_image_url else 'NO'}")
     print(f"[FalEdit] model={model}, image_size={image_size}")
 
-    # 调用 fal 服务提交编辑请求
+    # 模型固定为 openai/gpt-image-2/edit
+    model = 'openai/gpt-image-2/edit'
+
+    # 调用 fal 服务提交编辑请求，模型固定为 openai/gpt-image-2/edit
     result = fal_service.submit_edit(
         prompt=prompt,
         image_urls=image_urls,
-        model=model,
+        model='openai/gpt-image-2/edit',
         mask_image_url=mask_image_url,
         image_size=image_size,
         quality=quality,
         num_images=num_images,
         output_format=output_format,
-        seed=seed
+        seed=seed,
+        sync_mode=False
     )
 
     print(f"[FalEdit] ===== Fal API response =====")
@@ -2062,7 +2671,7 @@ def _handle_fal_edit(request, prompt, image_file, mask_file, reference_files, mo
             return jsonify({'error': 'Fal 编辑同步返回图片 URL 为空'}), 500
 
         # 同步模式直接返回：保存资产和记录
-        asset_result = save_edit_result_directly(image_url, prompt, size)
+        asset_result = save_edit_result_directly(image_url, prompt, size, creator=creator)
         saved_image = add_image(
             url=asset_result.get('display_url') or asset_result.get('url', image_url),
             thumbnail=asset_result.get('thumbnail', ''),
@@ -2075,7 +2684,9 @@ def _handle_fal_edit(request, prompt, image_file, mask_file, reference_files, mo
             parent_id=parent_id,
             folder_path='',
             image_type='edit',
-            poster_copy=get_inherited_poster_copy(parent_id)
+            poster_copy=get_inherited_poster_copy(parent_id),
+            # 制作人：同步编辑结果写入 images.creator，确保画板筛选可用
+            creator=creator
         )
 
         if parent_id:
@@ -2115,7 +2726,9 @@ def _handle_fal_edit(request, prompt, image_file, mask_file, reference_files, mo
         parent_id=parent_id,
         folder_path='',
         image_type='edit',
-        poster_copy=get_inherited_poster_copy(parent_id)
+        poster_copy=get_inherited_poster_copy(parent_id),
+        # 制作人：异步任务占位记录写入 images.creator，轮询结果会沿用同一 image_id
+        creator=creator
     )
 
     # 添加编辑关系
@@ -2139,7 +2752,9 @@ def _handle_fal_edit(request, prompt, image_file, mask_file, reference_files, mo
             'api_source': 'fal',
             'model': model,
             'response_url': response_url,
-            'raw_edit_result': result
+            'raw_edit_result': result,
+            # 制作人：随任务数据透传，TaskProcessor 落盘结果时优先读取此字段
+            'creator': creator
         }
     )
 
@@ -2277,19 +2892,63 @@ def upload_image():
         return jsonify({'status': 'error', 'message': f'上传失败: {str(e)}'}), 500
 
 
+@images_bp.route('/api/images/thumbnails/repair-jpg', methods=['POST'])
+def repair_thumbnails_to_jpg():
+    processed = 0
+    succeeded = 0
+    failed = 0
+    failures = []
+
+    try:
+        for image_type in ('generation', 'edit'):
+            for image in load_images(image_type=image_type):
+                if getattr(image, 'api_source', '') == 'topaz_gigapixel' or getattr(image, 'image_type', '') == 'gigapixel':
+                    continue
+                processed += 1
+                try:
+                    result = _repair_one_image_thumbnail_to_jpg(image)
+                    if result.get('success'):
+                        succeeded += 1
+                    else:
+                        failed += 1
+                        if len(failures) < 20:
+                            failures.append({'id': getattr(image, 'id', ''), 'error': result.get('error', '')})
+                except Exception as err:
+                    failed += 1
+                    if len(failures) < 20:
+                        failures.append({'id': getattr(image, 'id', ''), 'error': str(err)})
+                    print(f"[images] Warning: failed to repair thumbnail for {getattr(image, 'id', '')}: {err}")
+
+        material_result = _repair_material_thumbnails_to_jpg()
+        processed += material_result['processed']
+        succeeded += material_result['succeeded']
+        failed += material_result['failed']
+
+        return jsonify({
+            'success': True,
+            'processed': processed,
+            'succeeded': succeeded,
+            'failed': failed,
+            'failures': failures
+        }), 200
+    except Exception as err:
+        print(f"[images] repair jpg thumbnails failed: {err}")
+        return jsonify({'success': False, 'error': str(err)}), 500
+
+
 @images_bp.route('/api/images', methods=['GET'])
 def get_images():
     image_type = request.args.get('image_type', 'generation')
     if image_type not in ('generation', 'edit'):
         image_type = 'generation'
-    images = load_images(image_type=image_type)
+    images = load_images(image_type=image_type, creator=_image_scope_creator())
     updated_images = []
     for image in images:
         try:
             repair_thumbnail_if_needed(image)
         except (ValueError, RuntimeError) as err:
             print(f"[images] Warning: Failed to repair thumbnail for {image.id}: {err}")
-        refreshed_image = get_image_by_id(image.id)
+        refreshed_image = get_image_by_id(image.id, creator=_image_scope_creator())
         updated_images.append(serialize_image(refreshed_image) if refreshed_image else serialize_image(image))
 
     return jsonify({
@@ -2306,7 +2965,7 @@ def get_single_image(image_id):
     功能描述：
         根据 image_id 返回单张图片的完整信息
     """
-    image = get_image_by_id(image_id)
+    image = _get_scoped_image_by_id(image_id)
     if not image:
         return jsonify({'error': 'Image not found'}), 404
     return jsonify({'status': 'success', 'image': serialize_image(image)}), 200
@@ -2328,7 +2987,7 @@ def remove_image(image_id):
         - 数据库删除失败：返回 404
         - 本地文件删除失败：记录日志但不影响返回结果
     """
-    image = get_image_by_id(image_id)
+    image = _get_scoped_image_by_id(image_id)
     success, local_path = delete_image(image_id)
 
     if success:
@@ -2380,7 +3039,7 @@ def update_image_title(image_id):
         return jsonify({'error': 'title is required'}), 400
 
     # 获取当前图片信息
-    current_image = get_image_by_id(image_id)
+    current_image = _get_scoped_image_by_id(image_id)
     if not current_image:
         return jsonify({'error': 'Image not found'}), 404
 
@@ -2395,7 +3054,7 @@ def update_image_title(image_id):
                 # 更新数据库中的文件夹路径（级联更新）
                 update_image_folder_path(image_id, folder_result['new_folder_path'])
                 # 重新获取更新后的图片
-                updated_image = get_image_by_id(image_id)
+                updated_image = _get_scoped_image_by_id(image_id)
 
         response_data = {
             'status': 'success',
@@ -2427,7 +3086,7 @@ def get_image_edit_history(image_id):
     """
     try:
         # 获取图片信息
-        image = get_image_by_id(image_id)
+        image = _get_scoped_image_by_id(image_id)
         if not image:
             return jsonify({'error': 'Image not found'}), 404
 
@@ -2505,7 +3164,7 @@ def download_image():
         return jsonify({'error': 'image_url is required'}), 400
 
     try:
-        result = download_image_to_local(image_url)
+        result = download_image_to_local(image_url, creator=current_creator())
         return jsonify({
             'status': 'success',
             'data': result
@@ -2527,7 +3186,7 @@ def gptsapi_retry():
     aspect_ratio = data.get('aspect_ratio') or data.get('aspectRatio', '')
     resolution = data.get('resolution', '2K')
     image_type = data.get('image_type', 'generation')
-
+    creator = _creator_from_request(data.get('creator'))
     # 从 raw_result 中提取查询 URL
     if not poll_url:
         if isinstance(raw_result, dict):
@@ -2552,7 +3211,7 @@ def gptsapi_retry():
 
     first_url = image_urls[0]
     try:
-        asset_result = prepare_image_assets(first_url)
+        asset_result = prepare_image_assets(first_url, creator=creator)
     except (ValueError, RuntimeError) as err:
         print(f"[images] GPTsAPI retry: Failed to prepare assets: {err}")
         asset_result = {'url': first_url, 'thumbnail': '', 'local_path': None, 'thumbnail_path': None}
@@ -2565,9 +3224,10 @@ def gptsapi_retry():
         size=size,
         local_path=asset_result.get('local_path'),
         thumbnail_path=asset_result.get('thumbnail_path'),
-        image_type=image_type,
-        api_source='gptsapi'
-    )
+                image_type=image_type,
+                api_source='gptsapi',
+                creator=creator
+            )
 
     if len(image_urls) > 1:
         for extra_url in image_urls[1:]:
@@ -2585,9 +3245,52 @@ def gptsapi_retry():
     }), 200
 
 
+# APIYI 失败任务重试路由
+# 功能描述：
+#     前端在失败任务卡上点「重试」时调用，复用 task.data 中的参数（prompt/size/image_paths）
+#     重新提交到 _apiyi_executor；服务内部会先校验 temp 文件是否还在。
+# 实现逻辑：
+#     1. 接收 { task_id } JSON；缺失返回 400
+#     2. 调用 apiyi_retry_service.retry_apiyi_task(task_id, _apiyi_executor)
+#     3. 把 service 返回的 ok/error_code 映射为 HTTP 状态码：
+#         - ok=True: 202
+#         - temp_files_missing: 410 (Gone) - 资源失效，需重新提交
+#         - status_not_failure: 409 (Conflict)
+#         - 其他: 400
+# 异常处理：捕获 service 内未覆盖的异常，兜底返回 500
+@images_bp.route('/api/images/apiyi/retry', methods=['POST'])
+def apiyi_retry():
+    data = request.get_json(silent=True) or {}
+    task_id = data.get('task_id')
+    if not task_id:
+        return jsonify({'ok': False, 'error': 'task_id is required'}), 400
+
+    from services.apiyi_retry_service import retry_apiyi_task
+    result = retry_apiyi_task(task_id, _apiyi_executor)
+
+    if result.get('ok'):
+        return jsonify({
+            'ok': True,
+            'status': 'pending',
+            'task_id': result['task_id'],
+            'image_id': result.get('image_id'),
+            'retry_count': result.get('retry_count', 1),
+        }), 202
+
+    err_code = result.get('error_code', 'unknown')
+    err_msg = result.get('error', '重试失败')
+    if err_code == 'task_not_found':
+        return jsonify({'ok': False, 'error_code': err_code, 'error': err_msg}), 404
+    if err_code in ('temp_files_missing', 'image_missing'):
+        return jsonify({'ok': False, 'error_code': err_code, 'error': err_msg}), 410
+    if err_code == 'status_not_failure':
+        return jsonify({'ok': False, 'error_code': err_code, 'error': err_msg}), 409
+    return jsonify({'ok': False, 'error_code': err_code, 'error': err_msg}), 400
+
+
 @images_bp.route('/api/images/<image_id>/refresh', methods=['POST'])
 def refresh_image(image_id):
-    image = get_image_by_id(image_id)
+    image = _get_scoped_image_by_id(image_id)
 
     if not image:
         return jsonify({'error': 'Image not found'}), 404
@@ -2599,7 +3302,7 @@ def refresh_image(image_id):
         return jsonify({'error': 'image_url is required and no URL found in database'}), 400
 
     try:
-        asset_result = prepare_image_assets(image_url)
+        asset_result = prepare_image_assets(image_url, creator=getattr(image, 'creator', '') or current_creator())
 
         image.url = asset_result.get('url') or image_url
         image.local_path = asset_result.get('local_path')

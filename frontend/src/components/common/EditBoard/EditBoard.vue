@@ -21,6 +21,18 @@
         </svg>
         <span>全选</span>
       </button>
+      <!-- 制作人筛选：仅作为展示与编辑入口，状态由父组件管理，本组件通过 props/emit 通信 -->
+      <div class="edit-board__toolbar-creator">
+        <span class="edit-board__toolbar-creator-label">制作人</span>
+        <Select
+          :model-value="creator"
+          :options="creatorOptions"
+          :placeholder="creatorOptions.length > 0 ? '选择制作人' : '请先在设置中配置制作人'"
+          :disabled="creatorOptions.length === 0"
+          wrapper-class="edit-board__toolbar-creator-select"
+          @update:model-value="(val) => emit('update:creator', val)"
+        />
+      </div>
     </div>
 
     <div v-if="selectionMode && selectedImages.length > 0" class="edit-board__batch-bar">
@@ -85,6 +97,17 @@
               <line x1="12" y1="16" x2="12.01" y2="16"></line>
             </svg>
             <span class="edit-board__error-text">{{ image.error }}</span>
+            <button
+              v-if="image.taskId && image.apiSource === 'apiyi'"
+              class="edit-board__retry-btn"
+              @click.stop="emit('retry', image)"
+            >
+              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                <polyline points="23 4 23 10 17 10"></polyline>
+                <path d="M20.49 15a9 9 0 1 1-2.12-9.36L23 10"></path>
+              </svg>
+              <span>重试</span>
+            </button>
           </div>
           <div v-if="!selectionMode && !image.generating && !image.error" class="edit-board__overlay">
             <div class="edit-board__actions">
@@ -124,6 +147,15 @@
                 </svg>
                 <span>预备</span>
               </button>
+              <button class="edit-board__action-btn" title="添加到GEO" @click.stop="emit('add-to-geo', image)">
+                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                  <circle cx="12" cy="12" r="10"/>
+                  <line x1="2" y1="12" x2="22" y2="12"/>
+                  <path d="M12 2a15.3 15.3 0 0 1 0 20"/>
+                  <path d="M12 2a15.3 15.3 0 0 0 0 20"/>
+                </svg>
+                <span>GEO</span>
+              </button>
             </div>
           </div>
           <div v-if="selectionMode && isSelected(image)" class="edit-board__selected-mark">
@@ -134,9 +166,9 @@
         </div>
         <div class="edit-board__info">
           <div class="edit-board__meta">
-            <span class="edit-board__meta-item">{{ image.apiSource === 'fal' ? 'Fal' : image.apiSource === 'gptsapi' ? 'GPTsAPI' : 'T8' }}</span>
+            <span class="edit-board__meta-item">{{ formatApiSourceLabel(image.apiSource) }}</span>
             <span class="edit-board__meta-item">{{ image.size || '1024x1024' }}</span>
-            <span class="edit-board__meta-item">PNG</span>
+            <span class="edit-board__meta-item">{{ formatImageFormatLabel(image) }}</span>
           </div>
         </div>
       </div>
@@ -146,6 +178,8 @@
 
 <script setup>
 import { ref } from 'vue'
+import { formatApiSourceLabel, formatImageFormatLabel } from '@/utils/platformDisplay'
+import Select from '@/components/common/Select/Select.vue'
 
 const props = defineProps({
   images: {
@@ -155,10 +189,20 @@ const props = defineProps({
   selectedId: {
     type: String,
     default: null
+  },
+  // 当前制作人筛选值（v-model），由父组件管理
+  creator: {
+    type: String,
+    default: ''
+  },
+  // 制作人下拉选项（来自父组件 configStore.creatorOptions.options 派生）
+  creatorOptions: {
+    type: Array,
+    default: () => []
   }
 })
 
-const emit = defineEmits(['select', 'edit', 'delete', 'save', 'download', 'batchDelete', 'batchSave', 'add-to-preparation'])
+const emit = defineEmits(['select', 'edit', 'delete', 'save', 'download', 'batchDelete', 'batchSave', 'add-to-preparation', 'add-to-geo', 'retry', 'update:creator'])
 
 const selectionMode = ref(false)
 const selectedImages = ref([])
@@ -328,6 +372,27 @@ const handleDownload = (image) => {
     }
   }
 
+  // 工具栏上的制作人筛选容器
+  &__toolbar-creator {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    margin-left: $spacing-xs;
+    min-width: 200px;
+  }
+
+  &__toolbar-creator-label {
+    font-size: 11px;
+    font-weight: 500;
+    color: $color-text-secondary;
+    white-space: nowrap;
+  }
+
+  &__toolbar-creator-select {
+    flex: 1;
+    min-width: 140px;
+  }
+
   &__batch-bar {
     display: flex;
     align-items: center;
@@ -487,6 +552,31 @@ const handleDownload = (image) => {
     padding: 0 8px;
     max-height: 40px;
     overflow: hidden;
+  }
+
+  &__retry-btn {
+    @include flex-center;
+    gap: 4px;
+    margin-top: 4px;
+    padding: 4px 10px;
+    background: rgba(255, 255, 255, 0.18);
+    border: 1px solid rgba(255, 255, 255, 0.4);
+    border-radius: $radius-md;
+    color: $color-text-inverse;
+    font-size: 11px;
+    cursor: pointer;
+    transition: all $transition-fast;
+
+    svg {
+      width: 12px;
+      height: 12px;
+    }
+
+    &:hover {
+      background: rgba(255, 255, 255, 0.32);
+      border-color: rgba(255, 255, 255, 0.6);
+      transform: scale(1.04);
+    }
   }
 
   &__overlay {

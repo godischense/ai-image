@@ -110,6 +110,29 @@ def init_db():
         )
     ''')
 
+    cursor.execute('''
+        CREATE TABLE IF NOT EXISTS geo_items (
+            id TEXT PRIMARY KEY,
+            filename TEXT NOT NULL,
+            folder_path TEXT NOT NULL DEFAULT '',
+            display_name TEXT NOT NULL DEFAULT '',
+            platform TEXT NOT NULL DEFAULT '',
+            publish_platform TEXT NOT NULL DEFAULT '',
+            score INTEGER NOT NULL DEFAULT 0,
+            copy_text TEXT NOT NULL DEFAULT '',
+            copy_title TEXT NOT NULL DEFAULT '',
+            is_usable INTEGER NOT NULL DEFAULT 0,
+            is_publishable INTEGER NOT NULL DEFAULT 0,
+            publish_date TEXT NOT NULL DEFAULT '',
+            social_copy TEXT NOT NULL DEFAULT '',
+            publish_code TEXT NOT NULL DEFAULT '',
+            poster_copy TEXT NOT NULL DEFAULT '',
+            audit_status TEXT NOT NULL DEFAULT '',
+            created_at TEXT NOT NULL,
+            updated_at TEXT NOT NULL
+        )
+    ''')
+
     conn.commit()
     conn.close()
 
@@ -157,6 +180,12 @@ def migrate_add_edit_fields():
         if 'poster_copy' not in columns:
             cursor.execute("ALTER TABLE images ADD COLUMN poster_copy TEXT NOT NULL DEFAULT ''")
             print("[Database] Added poster_copy column to images table")
+
+        # 制作人字段：用于生图/编辑页记录当前图片的制作人归属
+        # 不发送到 API 请求，仅作为本地元数据保存
+        if 'creator' not in columns:
+            cursor.execute("ALTER TABLE images ADD COLUMN creator TEXT NOT NULL DEFAULT ''")
+            print("[Database] Added creator column to images table")
 
         cursor.execute("""
             UPDATE images
@@ -237,6 +266,11 @@ def migrate_add_edit_fields():
             cursor.execute("ALTER TABLE preparation_items ADD COLUMN poster_copy TEXT NOT NULL DEFAULT ''")
             print("[Database] Added poster_copy column to preparation_items table")
 
+        # 制作人字段：与 images / geo_items 对称
+        if 'creator' not in prep_columns:
+            cursor.execute("ALTER TABLE preparation_items ADD COLUMN creator TEXT NOT NULL DEFAULT ''")
+            print("[Database] Added creator column to preparation_items table")
+
         cursor.execute("""
             UPDATE preparation_items
             SET is_publishable = 0
@@ -264,6 +298,68 @@ def migrate_add_edit_fields():
         cursor.execute("""
             CREATE INDEX IF NOT EXISTS idx_preparation_publish_date
             ON preparation_items(is_publishable, publish_date)
+        """)
+
+        cursor.execute('''
+            CREATE TABLE IF NOT EXISTS geo_items (
+                id TEXT PRIMARY KEY,
+                filename TEXT NOT NULL,
+                folder_path TEXT NOT NULL DEFAULT '',
+                display_name TEXT NOT NULL DEFAULT '',
+                platform TEXT NOT NULL DEFAULT '',
+                publish_platform TEXT NOT NULL DEFAULT '',
+                score INTEGER NOT NULL DEFAULT 0,
+                copy_text TEXT NOT NULL DEFAULT '',
+                copy_title TEXT NOT NULL DEFAULT '',
+                is_usable INTEGER NOT NULL DEFAULT 0,
+                is_publishable INTEGER NOT NULL DEFAULT 0,
+                publish_date TEXT NOT NULL DEFAULT '',
+                social_copy TEXT NOT NULL DEFAULT '',
+                publish_code TEXT NOT NULL DEFAULT '',
+                poster_copy TEXT NOT NULL DEFAULT '',
+                audit_status TEXT NOT NULL DEFAULT '',
+                created_at TEXT NOT NULL,
+                updated_at TEXT NOT NULL
+            )
+        ''')
+
+        cursor.execute("PRAGMA table_info(geo_items)")
+        geo_columns = [row['name'] for row in cursor.fetchall()]
+        geo_defaults = {
+            'folder_path': "TEXT NOT NULL DEFAULT ''",
+            'display_name': "TEXT NOT NULL DEFAULT ''",
+            'platform': "TEXT NOT NULL DEFAULT ''",
+            'publish_platform': "TEXT NOT NULL DEFAULT ''",
+            'score': "INTEGER NOT NULL DEFAULT 0",
+            'copy_text': "TEXT NOT NULL DEFAULT ''",
+            'copy_title': "TEXT NOT NULL DEFAULT ''",
+            'is_usable': "INTEGER NOT NULL DEFAULT 0",
+            'is_publishable': "INTEGER NOT NULL DEFAULT 0",
+            'publish_date': "TEXT NOT NULL DEFAULT ''",
+            'social_copy': "TEXT NOT NULL DEFAULT ''",
+            'publish_code': "TEXT NOT NULL DEFAULT ''",
+            'poster_copy': "TEXT NOT NULL DEFAULT ''",
+            'audit_status': "TEXT NOT NULL DEFAULT ''",
+            'creator': "TEXT NOT NULL DEFAULT ''"
+        }
+        for column, definition in geo_defaults.items():
+            if column not in geo_columns:
+                cursor.execute(f"ALTER TABLE geo_items ADD COLUMN {column} {definition}")
+                print(f"[Database] Added {column} column to geo_items table")
+
+        cursor.execute("""
+            CREATE INDEX IF NOT EXISTS idx_geo_publishable_created_at
+            ON geo_items(is_publishable, created_at)
+        """)
+
+        cursor.execute("""
+            CREATE INDEX IF NOT EXISTS idx_geo_folder_filename
+            ON geo_items(folder_path, filename)
+        """)
+
+        cursor.execute("""
+            CREATE INDEX IF NOT EXISTS idx_geo_publish_date
+            ON geo_items(is_publishable, publish_date)
         """)
 
         conn.commit()

@@ -77,6 +77,151 @@ def _get_country_dir(country):
     return safe_name, country_dir, None
 
 
+# 获取或创建国家目录（用于上传时自动创建不存在的国家文件夹）
+def _get_or_create_country_dir(country):
+    country_name = (country or '').strip()
+    if not country_name:
+        return None, None, '国家不能为空'
+
+    safe_name = os.path.normpath(country_name)
+    if safe_name.startswith('..') or os.path.isabs(safe_name) or os.sep in safe_name or (os.altsep and os.altsep in safe_name):
+        return None, None, '非法的国家名称'
+
+    country_dir = os.path.join(COPY_DIR, safe_name)
+    real_country_dir = os.path.realpath(country_dir)
+    real_copy_dir = os.path.realpath(COPY_DIR)
+    try:
+        if os.path.commonpath([real_country_dir, real_copy_dir]) != real_copy_dir:
+            return None, None, '非法的国家名称'
+    except ValueError:
+        return None, None, '非法的国家名称'
+
+    os.makedirs(country_dir, exist_ok=True)
+    return safe_name, country_dir, None
+
+
+# 从文件名中提取国家名称
+# 提取规则：取文件名中第一个数字或中文全角括号"（"之前的部分作为国家名
+def _extract_country_from_filename(filename):
+    basename = os.path.splitext(filename)[0]
+    country_name = ''
+    for ch in basename:
+        if ch.isdigit() or ch == '（':
+            break
+        country_name += ch
+    country_name = country_name.strip()
+    if not country_name:
+        return None, '无法从文件名中提取国家名称'
+    return country_name, None
+
+
+# 上传HTML文案文件
+# 功能描述：
+#     接收上传的HTML文件数据，从文件名中提取国家名称，自动创建国家目录（如不存在），
+#     将文件保存到对应国家文件夹下。如果同名文件已存在，返回冲突提示由前端决定是否覆盖。
+def upload_copy_html(file_data, filename):
+    try:
+        if not filename or not filename.strip():
+            return {'success': False, 'error': '文件名不能为空'}
+
+        clean_filename = os.path.basename(filename.strip())
+        lower_name = clean_filename.lower()
+        if not (lower_name.endswith('.html') or lower_name.endswith('.htm')):
+            return {'success': False, 'error': '只支持上传 .html 或 .htm 文件'}
+
+        country_name, error = _extract_country_from_filename(clean_filename)
+        if error:
+            return {'success': False, 'error': error}
+
+        safe_country, country_dir, error = _get_or_create_country_dir(country_name)
+        if error:
+            return {'success': False, 'error': error}
+
+        target_path = os.path.join(country_dir, clean_filename)
+        real_target = os.path.realpath(target_path)
+        real_copy_dir = os.path.realpath(COPY_DIR)
+        try:
+            if os.path.commonpath([real_target, real_copy_dir]) != real_copy_dir:
+                return {'success': False, 'error': '非法的文件路径'}
+        except ValueError:
+            return {'success': False, 'error': '非法的文件路径'}
+
+        exists = os.path.exists(target_path)
+
+        if not exists:
+            if isinstance(file_data, str):
+                with open(target_path, 'w', encoding='utf-8', newline='') as f:
+                    f.write(file_data)
+            else:
+                file_data.save(target_path)
+
+        relative_path = os.path.join(safe_country, clean_filename)
+
+        if exists:
+            return {
+                'success': True,
+                'exists': True,
+                'filename': clean_filename,
+                'country': safe_country,
+                'relative_path': relative_path,
+                'message': '文件已存在，是否覆盖？'
+            }
+
+        file_info = _make_file_payload(safe_country, clean_filename, target_path, 'html')
+        return {
+            'success': True,
+            'exists': False,
+            'file': file_info,
+            'country': safe_country,
+            'message': '上传成功'
+        }
+
+    except Exception as e:
+        print(f"[CopyService] upload_copy_html error: {e}")
+        return {'success': False, 'error': str(e)}
+
+
+# 确认覆盖上传HTML文件（当文件已存在时）
+def confirm_upload_copy_html(filename, country):
+    try:
+        if not filename or not filename.strip():
+            return {'success': False, 'error': '文件名不能为空'}
+        if not country or not country.strip():
+            return {'success': False, 'error': '国家不能为空'}
+
+        clean_filename = os.path.basename(filename.strip())
+        safe_country, country_dir, error = _get_or_create_country_dir(country.strip())
+        if error:
+            return {'success': False, 'error': error}
+
+        target_path = os.path.join(country_dir, clean_filename)
+        real_target = os.path.realpath(target_path)
+        real_copy_dir = os.path.realpath(COPY_DIR)
+        try:
+            if os.path.commonpath([real_target, real_copy_dir]) != real_copy_dir:
+                return {'success': False, 'error': '非法的文件路径'}
+        except ValueError:
+            return {'success': False, 'error': '非法的文件路径'}
+
+        if not os.path.exists(target_path):
+            return {'success': False, 'error': '文件不存在，无法覆盖'}
+
+        if not os.path.isfile(target_path):
+            return {'success': False, 'error': '目标路径不是文件'}
+
+        file_info = _make_file_payload(safe_country, clean_filename, target_path, 'html')
+        return {
+            'success': True,
+            'file': file_info,
+            'country': safe_country,
+            'message': '文件已存在，等待前端发送内容覆盖'
+        }
+
+    except Exception as e:
+        print(f"[CopyService] confirm_upload_copy_html error: {e}")
+        return {'success': False, 'error': str(e)}
+
+
 def _read_html_with_encoding(file_path):
     for encoding in ['utf-8', 'gbk', 'gb2312', 'utf-8-sig']:
         try:
@@ -174,7 +319,8 @@ def _normalize_board_cards(cards):
             'created_at': str(card.get('created_at') or now),
             'updated_at': str(card.get('updated_at') or now),
             'made': bool(card.get('made', False)),
-            'reviewed': bool(card.get('reviewed', False))
+            'reviewed': bool(card.get('reviewed', False)),
+            'published': bool(card.get('published', False))
         })
 
     return normalized, None
@@ -301,7 +447,9 @@ def read_copy_html(relative_path):
         return {
             'success': True,
             'content': content,
-            'encoding': used_encoding
+            'encoding': used_encoding,
+            'file_key': relative_path,
+            'last_modified_at': datetime.fromtimestamp(os.path.getmtime(file_path)).isoformat()
         }
 
     except Exception as e:
@@ -409,7 +557,9 @@ def read_copy_board(relative_path):
             'success': True,
             'cards': cards,
             'updated_at': payload.get('updated_at', ''),
-            'created_at': payload.get('created_at', '')
+            'created_at': payload.get('created_at', ''),
+            'file_key': relative_path,
+            'last_modified_at': datetime.fromtimestamp(os.path.getmtime(file_path)).isoformat()
         }
 
     except json.JSONDecodeError:

@@ -661,6 +661,20 @@
     }
   }
 
+  &__link-button {
+    border: 0;
+    padding: 0;
+    background: transparent;
+    color: $primary-color;
+    font-size: $font-size-xs;
+    font-weight: $font-weight-medium;
+    cursor: pointer;
+
+    &:hover {
+      text-decoration: underline;
+    }
+  }
+
   &__progress-bar {
     flex: 1;
     height: 6px;
@@ -834,6 +848,34 @@
     &-time {
       font-size: 10px;
       color: $text-tertiary;
+    }
+
+    // 任务项底部操作区（如「→ 预备」按钮）
+    // @click.stop 已阻止冒泡，仍保持 cursor: pointer 来自父元素
+    &-actions {
+      display: flex;
+      justify-content: flex-end;
+      margin-top: 6px;
+      padding-top: 6px;
+      border-top: 1px dashed $border-light;
+    }
+  }
+
+  // 「→ 预备」按钮：与默认 btn 区分，配色走主色系
+  &__btn--prep {
+    background-color: rgba($primary-color, 0.08);
+    border-color: rgba($primary-color, 0.3);
+    color: $primary-color;
+    font-weight: 500;
+
+    &:hover:not(:disabled) {
+      background-color: rgba($primary-color, 0.18);
+      border-color: $primary-color;
+    }
+
+    &:disabled {
+      opacity: 0.6;
+      cursor: not-allowed;
     }
   }
 }

@@ -26,6 +26,7 @@ import hashlib
 from datetime import datetime
 from typing import Optional, Dict, Any
 import urllib3
+from services.creator_storage import creator_storage_dir, static_url_for_path
 
 
 class DownloadService:
@@ -93,7 +94,7 @@ class DownloadService:
         
         return f"generated_{timestamp}_{url_hash}_{unique_id}{extension}"
 
-    def download(self, image_url: str, local_path: Optional[str] = None) -> Dict[str, Any]:
+    def download(self, image_url: str, local_path: Optional[str] = None, creator: str = '') -> Dict[str, Any]:
         """
         下载远程图片到本地
 
@@ -116,7 +117,30 @@ class DownloadService:
             filename = self._generate_filename(image_url, extension)
 
             # 完整的本地文件路径
-            local_path = os.path.join(self.storage_dir, filename)
+            target_storage_dir = creator_storage_dir(self.storage_dir, creator)
+            os.makedirs(target_storage_dir, exist_ok=True)
+            local_path = os.path.join(target_storage_dir, filename)
+
+            # 近 N 秒内同 URL 已下载到本地 → 直接复用，避免重复下载产生孤儿文件
+            # 实现逻辑：扫描存储目录下文件名含相同 url_hash 的近期文件，命中则替换 local_path 并短路返回
+            # 异常处理：去重模块异常时 fail-open，继续走正常下载流程
+            try:
+                from services.download_dedup import find_recent_same_url_file
+                reused_path = find_recent_same_url_file(image_url, target_storage_dir)
+                if reused_path and os.path.isfile(reused_path) and os.path.getsize(reused_path) > 0:
+                    print(f"[DownloadService] Reusing recent download for url_hash={hashlib.md5(image_url.encode()).hexdigest()[:8]}, path={reused_path}")
+                    local_path = reused_path
+                    # 命中复用 → 直接返回成功结果，不发 HTTP 请求、不重写文件
+                    local_url = static_url_for_path(local_path, self.storage_dir, '/api/static/generated_images')
+                    return {
+                        'success': True,
+                        'local_path': local_path,
+                        'local_url': local_url,
+                        'url': image_url,
+                        'reused': True
+                    }
+            except Exception as dedup_err:
+                print(f"[DownloadService] Dedup check failed, proceeding with normal download: {dedup_err}")
 
         print(f"[DownloadService] Downloading image from: {image_url}")
         print(f"[DownloadService] Saving to: {local_path}")
@@ -151,9 +175,7 @@ class DownloadService:
                 print(f"[DownloadService] Successfully downloaded image to: {local_path}")
 
                 # 仅 generated_images 目录下的文件提供静态访问 URL。
-                local_url = ''
-                if os.path.dirname(local_path) == self.storage_dir:
-                    local_url = f"/api/static/generated_images/{os.path.basename(local_path)}"
+                local_url = static_url_for_path(local_path, self.storage_dir, '/api/static/generated_images')
 
                 return {
                     'success': True,
@@ -237,7 +259,7 @@ def get_download_service() -> DownloadService:
     return _download_service_instance
 
 
-def download_image_to_local(image_url: str, local_path: Optional[str] = None) -> Dict[str, Any]:
+def download_image_to_local(image_url: str, local_path: Optional[str] = None, creator: str = '') -> Dict[str, Any]:
     """
     下载图片到本地的便捷函数
 
@@ -256,7 +278,7 @@ def download_image_to_local(image_url: str, local_path: Optional[str] = None) ->
         >>> print(result['local_path'])
     """
     service = get_download_service()
-    return service.download(image_url, local_path)
+    return service.download(image_url, local_path, creator)
 
 
 def delete_local_file(local_path: str) -> bool:

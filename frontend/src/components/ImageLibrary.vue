@@ -27,7 +27,7 @@
               <span>{{ folder.name }}</span>
               <span class="image-library__folder-option-count">{{ folder.count }}</span>
               <button
-                v-if="folder.id !== 'all' && folder.id !== 'recycle'"
+                v-if="folder.id !== 'unassigned' && folder.id !== 'recycle'"
                 class="image-library__folder-option-delete"
                 @click.stop="handleDeleteFolder(folder)"
                 title="删除文件夹"
@@ -80,6 +80,14 @@
         </button>
       </div>
       <div class="image-library__header-right">
+        <div class="image-library__creator-select">
+          <Select
+            v-model="currentCreatorFilter"
+            :options="creatorFilterOptions"
+            placeholder="全部制作人"
+            wrapper-class="image-library__creator-select-wrapper"
+          />
+        </div>
         <div class="image-library__sort-select">
           <Select
             v-model="currentSortValue"
@@ -165,6 +173,22 @@
       </svg>
       <p class="image-library__empty-text">回收站为空</p>
       <p class="image-library__empty-hint">被删除的图片将在这里显示</p>
+    </div>
+
+    <!--
+      筛选命中 0 张时的兜底空态：
+      输入数据非空但制作人筛选把所有图片都过滤掉了，此时 props.images.length > 0
+      而 sortedImages.length === 0；上方的空态判定不会命中，会渲染出空白网格
+      （用户曾反馈"移动到新文件夹后看不到图"就是这种状态）。这里兜底显示空态提示。
+    -->
+    <div v-else-if="!isRecycleBinView && sortedImages.length === 0" class="image-library__empty">
+      <svg class="image-library__empty-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5">
+        <rect x="3" y="3" width="18" height="18" rx="2" ry="2"></rect>
+        <circle cx="8.5" cy="8.5" r="1.5"></circle>
+        <polyline points="21 15 16 10 5 21"></polyline>
+      </svg>
+      <p class="image-library__empty-text">当前筛选下没有图片</p>
+      <p class="image-library__empty-hint">尝试切换「{{ creatorFilterOptions.find((o) => o.value === currentCreatorFilter)?.label || '制作人' }}」或选择「全部制作人」</p>
     </div>
 
     <div v-else class="image-library__grid-container">
@@ -291,6 +315,20 @@
                       <span>预备</span>
                     </button>
                     <button
+                      v-if="!image.error && image.generating !== true"
+                      class="image-card__action-btn"
+                      @click.stop="emit('add-to-geo', image)"
+                      :disabled="image.disabled"
+                    >
+                      <svg class="image-card__icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                        <circle cx="12" cy="12" r="10"/>
+                        <line x1="2" y1="12" x2="22" y2="12"/>
+                        <path d="M12 2a15.3 15.3 0 0 1 0 20"/>
+                        <path d="M12 2a15.3 15.3 0 0 0 0 20"/>
+                      </svg>
+                      <span>GEO</span>
+                    </button>
+                    <button
                       class="image-card__action-btn image-card__action-btn--danger"
                       @click.stop="handleDelete(image)"
                     >
@@ -312,6 +350,17 @@
                       </svg>
                       <span>重新获取</span>
                     </button>
+                    <button
+                      v-if="image.error && image.apiSource === 'apiyi' && getTaskId(image)"
+                      class="image-card__action-btn"
+                      @click.stop="emit('apiyi-retry', image)"
+                    >
+                      <svg class="image-card__icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                        <polyline points="23 4 23 10 17 10"></polyline>
+                        <path d="M20.49 15a9 9 0 1 1-2.12-9.36L23 10"></path>
+                      </svg>
+                      <span>APIYI重试</span>
+                    </button>
                   </template>
                 </div>
               </div>
@@ -331,10 +380,10 @@
                     <line x1="16" y1="17" x2="8" y2="17"></line>
                     <polyline points="10 9 9 9 8 9"></polyline>
                   </svg>
-                  {{ image.apiSource === 'fal' ? 'Fal' : image.apiSource === 'gptsapi' ? 'GPTsAPI' : 'T8' }}
+                  {{ formatApiSourceLabel(image.apiSource) }}
                 </span>
                 <span class="image-card__meta-item">{{ formatImageSizeMeta(image) }}</span>
-                <span class="image-card__meta-item">PNG</span>
+                <span class="image-card__meta-item">{{ formatImageFormatLabel(image) }}</span>
               </div>
             </div>
           </div>
@@ -400,7 +449,7 @@
     <ConfirmDialog
       v-model:visible="showDeleteFolderConfirm"
       title="确认删除文件夹"
-      :message="`确定要删除文件夹「${deleteFolderTarget?.name}」吗？该文件夹内的所有图片将自动移动到「全部图片」。`"
+      :message="`确定要删除文件夹「${deleteFolderTarget?.name}」吗？该文件夹内的所有图片将自动移动到「未分配」。`"
       confirm-text="删除"
       cancel-text="取消"
       :danger="true"
@@ -487,8 +536,19 @@ import { ref, computed, watch, nextTick, onMounted } from 'vue'
 import ConfirmDialog from '@/components/common/ConfirmDialog/ConfirmDialog.vue'
 import MaterialSelector from '@/components/MaterialSelector.vue'
 import Select from '@/components/common/Select/Select.vue'
-import { getRecycleBinImages, restoreFromRecycleBin, permanentDelete, moveToRecycleBin, createFolder, deleteFolder } from '@/services/api'
+import {
+  getRecycleBinImages,
+  restoreFromRecycleBin,
+  permanentDelete,
+  moveToRecycleBin,
+  createFolder,
+  deleteFolder,
+  clearRecycleBin,
+  getUnassignedImages
+} from '@/services/api'
 import { useImageStore } from '@/stores/imageStore'
+import { useConfigStore } from '@/stores/configStore'
+import { formatApiSourceLabel, formatImageFormatLabel } from '@/utils/platformDisplay'
 import './ImageLibrary.scss'
 
 const props = defineProps({
@@ -521,10 +581,11 @@ const props = defineProps({
 const emit = defineEmits([
   'view', 'edit', 'delete', 'refresh', 'reuse-prompt',
   'sort', 'new-folder', 'clear-all', 'batch-reference', 'select-folder',
-  'enter-recycle-bin', 'add-to-preparation', 'gptsapi-retry'
+  'enter-recycle-bin', 'add-to-preparation', 'add-to-geo', 'gptsapi-retry', 'apiyi-retry'
 ])
 
 const imageStore = useImageStore()
+const configStore = useConfigStore()
 
 const showSortDropdown = ref(false)
 const showFolderDropdown = ref(false)
@@ -532,7 +593,9 @@ const showFolderModal = ref(false)
 const showMaterialSelector = ref(false)
 const newFolderName = ref('')
 const folderInputRef = ref(null)
-const activeFolder = ref('all')
+// 默认选中「未分配」虚拟文件夹
+// 实现逻辑：应用启动时直接进入 thumbnails 根目录的图列表，而不是聚合所有图
+const activeFolder = ref('unassigned')
 const showMoveModal = ref(false)
 const moveTargetFolderId = ref('')
 const folderList = ref([])
@@ -551,6 +614,32 @@ const deleteFolderTarget = ref(null)
 // 从 localStorage 读取上次的排序选择，如果没有则使用默认值 'latest'
 const savedSort = typeof window !== 'undefined' ? localStorage.getItem('image-library-sort') : null
 const currentSortValue = ref(savedSort || 'latest')
+const CREATOR_FILTER_STORAGE_KEY = 'image-library-creator-filter'
+const savedCreatorFilter = typeof window !== 'undefined' ? localStorage.getItem(CREATOR_FILTER_STORAGE_KEY) : null
+
+// 当前制作人筛选值（使用 Select 组件）
+// 从 configStore 读取后端持久化值；store 未初始化时使用空串兜底（=全部制作人）
+const currentCreatorFilter = ref(savedCreatorFilter || '')
+
+// 制作人筛选下拉选项：固定首项「全部制作人」(value='')，其余来自 configStore.creatorOptions.options
+// configStore.creatorOptions.options 是用户可在设置页维护的制作人列表
+// 数据来源真值在后端 app_config.creator_options 模块
+const creatorFilterOptions = computed(() => {
+  const fromStore = configStore?.creatorOptions?.options
+  const optionList = Array.isArray(fromStore) ? fromStore : []
+  return [
+    { value: '', label: '全部制作人' },
+    ...optionList.map((name) => ({ value: name, label: name }))
+  ]
+})
+
+const normalizeCreatorFilter = (creator) => {
+  const value = creator === null || creator === undefined ? '' : String(creator)
+  if (!value) return ''
+
+  const optionValues = creatorFilterOptions.value.map((option) => option.value)
+  return optionValues.includes(value) ? value : ''
+}
 
 const selectionMode = ref(false)
 const selectedImages = ref([])
@@ -561,6 +650,11 @@ const intrinsicByKey = ref({})
 const imageMeasureKey = (image) => {
   if (!image) return ''
   return image.id || image.url || image.thumbnail || ''
+}
+
+// 从 image 提取 taskId（兼容 snake_case 和 camelCase）
+const getTaskId = (image) => {
+  return image?.task_id || image?.taskId || null
 }
 
 const onCardImageLoad = (image, e) => {
@@ -660,18 +754,38 @@ const currentSort = computed(() => {
 })
 
 const folders = ref([
+  // 「全部图片」聚合视图：显示所有图片（含子文件夹）
   { id: 'all', name: '全部图片', count: 0 },
+  // 「未分配」虚拟文件夹：物理上对应 generated_thumbnails 根目录下的所有图片
+  // 不需要后端创建 folders 表记录，由后端 /api/folders 接口动态返回
+  { id: 'unassigned', name: '未分配', count: 0, isVirtual: true },
   { id: 'recycle', name: '回收站', count: 0 }
 ])
 
 const activeFolderName = computed(() => {
   const folder = folders.value.find(f => f.id === activeFolder.value)
-  return folder ? folder.name : '全部图片'
+  return folder ? folder.name : '未分配'
 })
 
+// 图片列表计算属性
+// 功能描述：
+//   在排序前先按 currentCreatorFilter 过滤图片，再应用当前排序规则
+// 实现逻辑：
+//   1. 根据是否在回收站视图选源数据 sourceImages
+//   2. 若 currentCreatorFilter 非空，只保留 creator 字段等于该值的图片
+//   3. 复制为新数组后按 currentSort 应用排序（latest/oldest/name-asc/name-desc）
+// 边界场景：
+//   - currentCreatorFilter 为空串时不过滤
+//   - 回收站视图同样应用筛选
 const sortedImages = computed(() => {
   const sourceImages = isRecycleBinView.value ? recycleBinImages.value : props.images
-  const sorted = [...sourceImages]
+
+  // 制作人筛选：空串=全部；非空串=精确匹配 creator 字段
+  const filterValue = currentCreatorFilter.value || ''
+  const filtered = filterValue
+    ? sourceImages.filter((img) => (img.creator || '') === filterValue)
+    : sourceImages
+  const sorted = [...filtered]
 
   if (isRecycleBinView.value) {
     // 回收站视图按删除时间排序
@@ -722,10 +836,27 @@ watch(currentSortValue, (newValue) => {
   if (typeof window !== 'undefined') {
     localStorage.setItem('image-library-sort', newValue)
   }
-  
+
   const selectedSort = sortOptions.find(s => s.value === newValue)
   if (selectedSort) {
     emit('sort', selectedSort)
+  }
+})
+
+// 监听制作人筛选变化：每次切换立即持久化到后端
+// 实现逻辑：调 configStore.setImageLibraryCreatorFilter，由 store 内部完成本地 + 后端双写
+// 失败处理：setImageLibraryCreatorFilter 内部已 try/catch，不会向上抛错，UI 状态保持
+watch(currentCreatorFilter, (newValue) => {
+  if (typeof window !== 'undefined') {
+    localStorage.setItem(CREATOR_FILTER_STORAGE_KEY, newValue || '')
+  }
+  configStore.setImageLibraryCreatorFilter(newValue || '')
+})
+
+watch(creatorFilterOptions, () => {
+  const normalized = normalizeCreatorFilter(currentCreatorFilter.value)
+  if (normalized !== currentCreatorFilter.value) {
+    currentCreatorFilter.value = normalized
   }
 })
 
@@ -809,8 +940,10 @@ const confirmDeleteFolder = async () => {
       await loadAllFolders()
 
       if (activeFolder.value === deleteFolderTarget.value.id) {
-        console.log('[ImageLibrary] 当前正在查看被删除的文件夹，切换到全部图片')
-        activeFolder.value = 'all'
+        // 删除文件夹后，图片 folder_id 置空，对应"未分配"视图
+        // 实现逻辑：避免停留在已删除的文件夹 id 上导致列表空白
+        console.log('[ImageLibrary] 当前正在查看被删除的文件夹，切换到未分配')
+        activeFolder.value = 'unassigned'
       }
 
       deleteFolderTarget.value = null
@@ -830,37 +963,62 @@ const handleClearAll = () => {
   showClearConfirm.value = true
 }
 
+/**
+ * 用户在 ConfirmDialog 中点击"清空"后真正执行的清空逻辑
+ *
+ * 功能描述：
+ *   根据当前视图类型执行不同的清空操作：
+ *   - 回收站视图：调用后端一次性清空接口，删除 回收站/ 目录所有文件 + DB 中所有 is_deleted=1 记录
+ *   - 普通视图：将当前可见图片逐张移入回收站（软删除）
+ *
+ * 实现逻辑：
+ *   1. 回收站视图：调用 clearRecycleBin() → DELETE /api/recycle/empty
+ *      成功后依次刷新本地列表 / 全部图片 / 文件夹 / 回收站计数
+ *   2. 普通视图：循环调用 moveToRecycleBin()，完成后 emit('refresh') 通知父组件
+ *   3. 任何分支最终都将 showClearConfirm 置为 false 关闭弹窗
+ *
+ * 失败处理：
+ *   - 回收站视图：仅控制台打印错误，不弹 alert（避免引入与项目规则冲突的新弹窗）
+ *   - 普通视图：保持原有 alert 行为
+ */
 const confirmClearAll = async () => {
   if (isRecycleBinView.value) {
-    // 回收站视图：永久删除所有图片
-    if (!confirm('确定要清空回收站吗？所有图片将被永久删除，此操作不可撤销。')) {
-      showClearConfirm.value = false
-      return
-    }
+    // 回收站视图：调用后端一次性清空接口
+    // 实现逻辑：
+    //   1. 由后端 empty_recycle_bin 遍历并删除 回收站/ 目录下所有文件/子目录
+    //   2. 由后端路由删除 images 表中所有 is_deleted = 1 的记录
+    //   3. 前端仅负责刷新本地视图
     try {
-      for (const img of recycleBinImages.value) {
-        await permanentDelete(img.id)
+      const result = await clearRecycleBin()
+      if (!result?.success) {
+        console.error('清空回收站失败:', result?.message)
+        return
       }
+      const deletedCount = result?.data?.deleted_count ?? recycleBinImages.value.length
+      console.log(`[ImageLibrary] 回收站已清空，共删除 ${deletedCount} 项`)
+      recycleBinImages.value = []
       await loadRecycleBinImages()
       await imageStore.fetchImages()
       await updateRecycleBinCount()
       await loadAllFolders()
     } catch (e) {
       console.error('清空回收站失败:', e)
-      alert('清空失败，请重试')
+    } finally {
+      showClearConfirm.value = false
     }
-  } else {
-    // 普通视图：移动所有图片到回收站
-    try {
-      for (const img of props.images) {
-        const sourcePath = img.local_path || img.localUrl || ''
-        await moveToRecycleBin(img.id, sourcePath)
-      }
-      emit('refresh')
-    } catch (e) {
-      console.error('清空失败:', e)
-      alert('清空失败，请重试')
+    return
+  }
+
+  // 普通视图：移动所有图片到回收站（保持原行为）
+  try {
+    for (const img of props.images) {
+      const sourcePath = img.local_path || img.localUrl || ''
+      await moveToRecycleBin(img.id, sourcePath)
     }
+    emit('refresh')
+  } catch (e) {
+    console.error('清空失败:', e)
+    alert('清空失败，请重试')
   }
   showClearConfirm.value = false
 }
@@ -1091,7 +1249,9 @@ const fetchFolders = async () => {
     const res = await fetch('/api/folders')
     const data = await res.json()
     if (data.success) {
-      folderList.value = (data.data || []).filter(f => f.name !== '全部图片' && f.name !== '回收站')
+      // 过滤掉「未分配」虚拟文件夹和「回收站」特殊文件夹
+      // 移动图片弹窗里只需要显示用户可管理的真实文件夹
+      folderList.value = (data.data || []).filter(f => f.id !== 'unassigned' && f.id !== 'recycle')
     }
   } catch (e) {
     console.error('获取文件夹失败:', e)
@@ -1208,16 +1368,27 @@ const loadAllFolders = async () => {
     }
 
     if (data.success && data.data) {
-      const apiFolders = data.data.map(f => ({
-        id: f.id,
-        name: f.name,
-        count: f.image_count || 0
-      }))
-      folders.value = [
+      // 拼接顺序：
+      //   1) 「全部图片」固定在最前
+      //   2) 后端返回的文件夹列表（已包含「未分配」虚拟文件夹）
+      //   3) 「回收站」兜底追加（后端没返回时）
+      // 实现逻辑：保留「全部图片」聚合视图的同时，新增「未分配」虚拟文件夹入口
+      const apiFolders = data.data
+        .filter(f => f.id !== 'all' && f.id !== 'recycle')
+        .map(f => ({
+          id: f.id,
+          name: f.name,
+          count: f.image_count || 0
+        }))
+      const folderIds = new Set(apiFolders.map(f => f.id))
+      const finalFolders = [
         { id: 'all', name: '全部图片', count: props.totalCount || props.images.length },
-        ...apiFolders,
-        { id: 'recycle', name: '回收站', count: recycleCount }
+        ...apiFolders
       ]
+      if (!folderIds.has('recycle')) {
+        finalFolders.push({ id: 'recycle', name: '回收站', count: recycleCount })
+      }
+      folders.value = finalFolders
     }
   } catch (e) {
     console.error('加载文件夹列表失败:', e)
@@ -1227,6 +1398,10 @@ const loadAllFolders = async () => {
 const restoreFolderSelection = () => {
   // 从 localStorage 读取上次选择的文件夹
   const savedFolder = typeof window !== 'undefined' ? localStorage.getItem('image-library-folder') : null
+  // 默认文件夹：未分配（虚拟视图）
+  // 实现逻辑：本地没保存过选择时，直接进入 thumbnails 根目录视图
+  const DEFAULT_FOLDER = 'unassigned'
+
   if (savedFolder && savedFolder !== 'recycle') {
     // 验证文件夹是否存在
     const folderExists = folders.value.some(f => f.id === savedFolder)
@@ -1235,29 +1410,56 @@ const restoreFolderSelection = () => {
       activeFolder.value = savedFolder
       emit('select-folder', savedFolder)
     } else {
-      // 文件夹不存在（可能已被删除），重置为全部图片并通知父组件
-      console.log('[ImageLibrary] 保存的文件夹不存在，重置为全部图片')
-      activeFolder.value = 'all'
+      // 文件夹不存在（可能已被删除），重置为未分配并通知父组件
+      console.log('[ImageLibrary] 保存的文件夹不存在，重置为未分配')
+      activeFolder.value = DEFAULT_FOLDER
       if (typeof window !== 'undefined') {
-        localStorage.setItem('image-library-folder', 'all')
+        localStorage.setItem('image-library-folder', DEFAULT_FOLDER)
       }
-      emit('select-folder', 'all')
+      emit('select-folder', DEFAULT_FOLDER)
     }
   } else if (savedFolder === 'recycle') {
-    // 如果上次选择的是回收站，刷新后重置为全部图片
-    console.log('[ImageLibrary] 上次选择的是回收站，重置为全部图片')
-    activeFolder.value = 'all'
+    // 如果上次选择的是回收站，刷新后重置为未分配
+    console.log('[ImageLibrary] 上次选择的是回收站，重置为未分配')
+    activeFolder.value = DEFAULT_FOLDER
     if (typeof window !== 'undefined') {
-      localStorage.setItem('image-library-folder', 'all')
+      localStorage.setItem('image-library-folder', DEFAULT_FOLDER)
     }
-    emit('select-folder', 'all')
+    emit('select-folder', DEFAULT_FOLDER)
+  } else {
+    // 首次进入：直接进入未分配视图
+    activeFolder.value = DEFAULT_FOLDER
+    emit('select-folder', DEFAULT_FOLDER)
   }
 }
 
 onMounted(async () => {
+  // 每次进入图片库都同步最新设置，确保设置页新增的制作人能立刻出现在筛选下拉中。
+  try {
+    await configStore.fetchConfig()
+  } catch (err) {
+    console.error('[ImageLibrary] fetchConfig 失败，使用本地缓存:', err?.message || err)
+  }
+  console.log('[ImageLibrary] creatorOptions.options =', JSON.stringify(configStore?.creatorOptions?.options))
+  console.log('[ImageLibrary] creatorFilterOptions =', JSON.stringify(creatorFilterOptions.value))
+
   await loadAllFolders()
   // 等待文件夹加载完成后再恢复选择
   restoreFolderSelection()
+  // 恢复后端持久化的制作人筛选值
+  // 功能描述：组件挂载时从 configStore 读取后端持久化的 selectedCreator
+  // 实现逻辑：fetchConfig 完成后 configStore 中 imageLibraryCreatorFilter.selectedCreator 已就绪
+  // 兜底：若 store 缺失该字段或值为 undefined，则保持初始空串（全部制作人）
+  const persistedCreator = configStore?.imageLibraryCreatorFilter?.selectedCreator
+  const fallbackCreator = typeof window !== 'undefined'
+    ? localStorage.getItem(CREATOR_FILTER_STORAGE_KEY)
+    : ''
+  const restoreCreator = typeof persistedCreator === 'string' && persistedCreator !== ''
+    ? persistedCreator
+    : (fallbackCreator || '')
+  if (typeof restoreCreator === 'string') {
+    currentCreatorFilter.value = normalizeCreatorFilter(restoreCreator)
+  }
 })
 
 watch(isRecycleBinView, (newVal) => {

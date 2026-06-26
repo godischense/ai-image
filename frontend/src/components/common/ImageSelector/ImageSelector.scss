@@ -29,6 +29,17 @@
     border-bottom: 1px solid #333;
   }
 
+  &__toolbar {
+    display: flex;
+    justify-content: flex-end;
+    padding: 12px 20px;
+    border-bottom: 1px solid #333;
+  }
+
+  &__creator-select {
+    width: 180px;
+  }
+
   &__title {
     margin: 0;
     font-size: 18px;

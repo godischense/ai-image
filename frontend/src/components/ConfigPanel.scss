@@ -75,6 +75,9 @@
     padding: $spacing-md $spacing-lg;
     border-bottom: 1px solid $border-light;
     background: linear-gradient(135deg, rgba($primary-color, 0.08), rgba($secondary-color, 0.06));
+    cursor: pointer;
+    user-select: none;
+    transition: background-color $transition-fast;
   }
 
   &__icon {
@@ -87,6 +90,113 @@
     font-size: $font-size-base;
     font-weight: $font-weight-semibold;
     color: $text-primary;
+  }
+
+  // 卡片头部的余额预览 chip：折叠态也能看到当前余额数字
+  // 状态：--success / --error / --loading 切换颜色
+  &__balance-chip {
+    @include flex-center;
+    gap: $spacing-xs;
+    margin-left: auto;
+    margin-right: $spacing-xs;
+    padding: 0.25rem 0.625rem;
+    border: 1px solid $border-color;
+    border-radius: $radius-full;
+    background-color: $bg-secondary;
+    color: $text-secondary;
+    font-size: $font-size-xs;
+    font-weight: $font-weight-medium;
+    cursor: pointer;
+    user-select: none;
+    transition: all $transition-fast;
+
+    &:hover {
+      border-color: rgba($primary-color, 0.3);
+      background-color: rgba($primary-color, 0.05);
+    }
+
+    &--success {
+      border-color: rgba($primary-color, 0.35);
+      background: linear-gradient(135deg, rgba($primary-color, 0.1), rgba($secondary-color, 0.08));
+      color: $primary-color;
+    }
+
+    &--error {
+      border-color: rgba($danger-color, 0.3);
+      background: rgba($danger-color, 0.06);
+      color: $danger-hover;
+    }
+
+    &--loading {
+      opacity: 0.85;
+    }
+  }
+
+  &__balance-icon {
+    font-size: 0.625rem;
+    line-height: 1;
+  }
+
+  &__balance-label {
+    opacity: 0.8;
+  }
+
+  &__balance-value {
+    font-variant-numeric: tabular-nums;
+    font-weight: $font-weight-semibold;
+    color: inherit;
+    margin-left: 0.125rem;
+  }
+
+  &__balance-spinner {
+    display: inline-block;
+    font-size: 0.75rem;
+    line-height: 1;
+    animation: t8-balance-spin 1s linear infinite;
+  }
+
+  @keyframes t8-balance-spin {
+    from { transform: rotate(0deg); }
+    to   { transform: rotate(360deg); }
+  }
+
+  // 收起/展开按钮样式
+  // 通过 margin-left: auto 推到卡片头部最右侧
+  // 收起时图标旋转 180 度，提示用户当前已收起
+  &__toggle {
+    @include flex-center;
+    margin-left: 0;
+    width: 28px;
+    height: 28px;
+    padding: 0;
+    border: 0;
+    border-radius: $radius-sm;
+    background: transparent;
+    color: $text-secondary;
+    cursor: pointer;
+    transition: background-color $transition-fast, transform $transition-fast;
+
+    &:hover {
+      background-color: rgba($primary-color, 0.1);
+      color: $primary-color;
+    }
+
+    &:active {
+      transform: scale(0.95);
+    }
+  }
+
+  &__toggle-icon {
+    display: inline-block;
+    font-size: 0.875rem;
+    line-height: 1;
+    transition: transform $transition-fast;
+    transform: rotate(0deg);
+  }
+
+  // 收起状态：图标向上旋转 180 度
+  &__toggle--collapsed &__toggle-icon {
+    transform: rotate(-180deg);
   }
 
   &__form {

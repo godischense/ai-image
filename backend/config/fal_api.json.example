@@ -1,7 +1,7 @@
 {
+  "baseUrl": "",
   "apiKey": "请在此处填写你的 fal.ai API Key",
   "falModels": [
-    "openai/gpt-image-2",
-    "openai/gpt-image-2/edit"
+    "openai/gpt-image-2"
   ]
 }

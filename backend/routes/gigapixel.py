@@ -29,7 +29,7 @@ import os
 import re
 import time
 import uuid
-from flask import Blueprint, request, jsonify
+from flask import Blueprint, request, jsonify, send_file
 
 from models.config_model import get_single_config
 from models.image_model import (
@@ -62,10 +62,17 @@ _ALLOWED_MIME_EXT = {
 _MAX_UPLOAD_BYTES = 50 * 1024 * 1024
 
 
+def _get_project_root():
+    """
+    获取真正的项目根目录（e:\\AI-image）。
+    __file__ = backend/routes/gigapixel.py，向上 3 级得到项目根。
+    """
+    return os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+
+
 def _get_upload_dir():
-    """获取上传目录绝对路径（项目根/gigapixel_temp/uploads/），确保目录存在"""
-    project_root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-    d = os.path.join(project_root, 'gigapixel_temp', 'uploads')
+    """获取上传目录绝对路径（项目根/gigapixel_temp/uploads/），确保目录存在。"""
+    d = os.path.join(_get_project_root(), 'gigapixel_sources', 'uploads')
     os.makedirs(d, exist_ok=True)
     return d
 
@@ -79,7 +86,7 @@ def upload_file():
 
     请求：multipart/form-data，字段名 file
     返回：
-        200: { success: true, uploaded_path: "E:\\...absolute...", preview_url: "/api/static/gigapixel_thumbnails/...", filename: "..." }
+        200: { success: true, uploaded_path: "E:\\...absolute...", filename: "..." }
         400: { success: false, error: "..." }
     """
     try:
@@ -125,28 +132,10 @@ def upload_file():
         with open(file_path, 'wb') as fw:
             fw.write(raw)
         abs_path = os.path.abspath(file_path)
-
-        # 生成预览缩略图（方便前端立即看到选中的图）
-        preview_url = ''
-        try:
-            from PIL import Image
-            thumb_dir = os.path.join(os.path.dirname(upload_dir), '..', 'gigapixel_thumbnails')
-            thumb_dir = os.path.abspath(thumb_dir)
-            os.makedirs(thumb_dir, exist_ok=True)
-            thumb_filename = f'preview_{filename}'
-            thumb_path = os.path.join(thumb_dir, thumb_filename)
-            with Image.open(file_path) as img:
-                img.thumbnail((400, 400))
-                img.save(thumb_path, 'JPEG', quality=85)
-            preview_url = f'/api/static/gigapixel_thumbnails/{thumb_filename}'
-        except Exception as e:
-            print(f'[gigapixel] 预览缩略图生成失败（非致命）: {e}')
-
-        print(f'[gigapixel] 上传成功: {abs_path}')
+        print(f'[gigapixel] upload success: {abs_path}')
         return jsonify({
             'success': True,
             'uploaded_path': abs_path,
-            'preview_url': preview_url,
             'filename': filename
         }), 200
 
@@ -388,6 +377,25 @@ def submit_upscale():
 
 
 # 查询单个任务状态
+def _get_task_input_path(task_id):
+    task = get_task(task_id)
+    if not task:
+        return ''
+    data = task.get('data') or {}
+    input_path = data.get('input_path') or ''
+    if not input_path or not os.path.isfile(input_path):
+        return ''
+    return os.path.abspath(input_path)
+
+
+@gigapixel_bp.route('/api/gigapixel/input/<task_id>', methods=['GET'])
+def serve_task_input(task_id):
+    input_path = _get_task_input_path(task_id)
+    if not input_path:
+        return jsonify({'success': False, 'error': 'input image not found'}), 404
+    return send_file(input_path)
+
+
 @gigapixel_bp.route('/api/gigapixel/task/<task_id>', methods=['GET'])
 def query_task(task_id):
     """
@@ -412,6 +420,9 @@ def query_task(task_id):
             img = get_image_by_id(image_id)
             if img:
                 image_data = _serialize_image(img)
+        task_data = dict(task.get('data') or {})
+        if task_data.get('input_path') and os.path.isfile(task_data.get('input_path')):
+            task_data['input_url'] = f'/api/gigapixel/input/{task_id}'
 
         return jsonify({
             'success': True,
@@ -423,7 +434,7 @@ def query_task(task_id):
                 'submit_time': task.get('submit_time'),
                 'start_time': task.get('start_time'),
                 'finish_time': task.get('finish_time'),
-                'data': task.get('data'),
+                'data': task_data,
                 'platform': task.get('platform'),
                 'api_source': task.get('api_source'),
             },
@@ -435,7 +446,7 @@ def query_task(task_id):
 
 
 # 任务历史列表
-@gigapixel_bp.route('/api/gigapixel/tasks', methods=['GET'])
+@ gigapixel_bp.route('/api/gigapixel/tasks', methods=['GET'])
 def list_tasks():
     """
     列出所有 topaz_gigapixel 任务（按 submit_time 倒序）。
@@ -443,9 +454,16 @@ def list_tasks():
     Query:
         status: 可选，按状态过滤（PENDING/IN_PROGRESS/SUCCESS/FAILURE/CANCELLED）
         limit: 默认 50
+        cleanup_invalid: 可选，默认 false。
+            为 true 时自动过滤掉「失败任务」和「图片不在 gigapixel_output 的任务」：
+              - status IN ('FAILURE', 'CANCELLED') 视为失败任务，直接过滤
+              - 关联 image 缺失 / local_path 为空 -> 过滤
+              - local_path 不在 gigapixel_output 目录下 -> 过滤
+              - local_path 指向的文件不存在 -> 过滤
+              - PENDING/IN_PROGRESS 任务无论图片是否存在都保留（用户能继续轮询）
 
     返回：
-        { success, tasks: [...] }
+        { success, tasks: [...], filtered_count?: int }
     """
     try:
         status_filter = (request.args.get('status') or '').strip()
@@ -454,6 +472,8 @@ def list_tasks():
         except ValueError:
             limit = 50
         limit = max(1, min(limit, 200))
+        # 是否启用失效任务清理（默认关闭，保持向后兼容）
+        cleanup_invalid = (request.args.get('cleanup_invalid') or '').strip().lower() in ('1', 'true', 'yes')
 
         conn = get_db_connection()
         cursor = conn.cursor()
@@ -463,21 +483,71 @@ def list_tasks():
                     SELECT * FROM tasks
                     WHERE api_source = ? AND status = ?
                     ORDER BY COALESCE(submit_time, 0) DESC
-                    LIMIT ?
-                ''', ('topaz_gigapixel', status_filter, limit))
+                ''', ('topaz_gigapixel', status_filter))
             else:
                 cursor.execute('''
                     SELECT * FROM tasks
                     WHERE api_source = ?
                     ORDER BY COALESCE(submit_time, 0) DESC
-                    LIMIT ?
-                ''', ('topaz_gigapixel', limit))
+                ''', ('topaz_gigapixel',))
             rows = cursor.fetchall()
+
+            # 预取所有相关 image 的 local_path（一次查询，避免 N+1）
+            image_ids = {row['image_id'] for row in rows if row['image_id']}
+            image_local_paths = {}
+            if image_ids:
+                placeholders = ','.join('?' * len(image_ids))
+                cursor.execute(
+                    f'SELECT id, local_path FROM images WHERE id IN ({placeholders})',
+                    tuple(image_ids)
+                )
+                for img_row in cursor.fetchall():
+                    image_local_paths[img_row['id']] = img_row['local_path'] or ''
         finally:
             conn.close()
 
+        # gigapixel_output 目录的绝对路径（项目根/gigapixel_output）
+        # 用与 gigapixel_task_service 一致的方式计算，跨平台兼容
+        _project_root = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+        gigapixel_output_dir_abs = os.path.normcase(os.path.abspath(os.path.join(_project_root, 'gigapixel_output')))
+
+        def is_image_in_gigapixel_output(task_row):
+            """
+            判断任务的图片是否仍位于 gigapixel_output 目录中且文件存在。
+            返回 True 表示保留，False 表示应过滤。
+            """
+            # PENDING/IN_PROGRESS 任务无论图片是否存在都保留（用户能继续轮询）
+            status = task_row['status']
+            if status in ('PENDING', 'IN_PROGRESS', '未启动', 'QUEUED', 'NOT_STARTED', 'NOT_START', 'WAITING'):
+                return True
+
+            # 失败/取消的任务一律过滤
+            if status in ('FAILURE', 'CANCELLED'):
+                return False
+
+            # SUCCESS 任务需要进一步校验图片文件
+            local_path = image_local_paths.get(task_row['image_id']) or ''
+            if not local_path:
+                return False
+            local_path_abs = os.path.normcase(os.path.abspath(local_path))
+            # 必须位于 gigapixel_output 目录
+            try:
+                if os.path.commonpath([local_path_abs, gigapixel_output_dir_abs]) != gigapixel_output_dir_abs:
+                    return False
+            except ValueError:
+                # 跨盘符等异常情况，直接视为不在
+                return False
+            # 文件必须真实存在
+            return os.path.isfile(local_path_abs)
+
         tasks = []
+        filtered_count = 0
         for row in rows:
+            # cleanup_invalid 模式下过滤失效任务
+            if cleanup_invalid and not is_image_in_gigapixel_output(row):
+                filtered_count += 1
+                continue
+
             task = dict(row)
             if task.get('data') and isinstance(task['data'], str):
                 import json
@@ -496,8 +566,15 @@ def list_tasks():
                 'finish_time': task.get('finish_time'),
                 'data': task.get('data'),
             })
+            # limit 截断
+            if len(tasks) >= limit:
+                break
 
-        return jsonify({'success': True, 'tasks': tasks}), 200
+        response = {'success': True, 'tasks': tasks}
+        # 仅在 cleanup_invalid 启用时返回被过滤的数量，方便前端提示用户
+        if cleanup_invalid:
+            response['filtered_count'] = filtered_count
+        return jsonify(response), 200
 
     except Exception as e:
         return jsonify({'success': False, 'error': str(e)}), 500

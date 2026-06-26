@@ -1,0 +1,6 @@
+{
+  "baseUrl": "https://api.apiyi.com",
+  "apiKey": "请在此处填写你的 API易 Key",
+  "imageModels": ["gpt-image-2-vip", "gpt-image-2"],
+  "accessToken": ""
+}

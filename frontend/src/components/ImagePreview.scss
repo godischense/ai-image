@@ -39,6 +39,85 @@
   &__actions {
     display: flex;
     gap: $spacing-sm;
+    align-items: center;
+    flex-wrap: wrap;
+  }
+
+  // 模式切换：自由 / 手机 的 segmented buttons
+  &__mode-switch {
+    display: inline-flex;
+    align-items: stretch;
+    padding: 2px;
+    background-color: $bg-tertiary;
+    border-radius: $radius-md;
+    gap: 2px;
+  }
+
+  &__mode-btn {
+    @include flex-center;
+    gap: $spacing-xs;
+    padding: $spacing-xs $spacing-sm;
+    background-color: transparent;
+    color: $text-secondary;
+    font-size: $font-size-sm;
+    font-weight: $font-weight-medium;
+    border-radius: $radius-sm;
+    @include transition-base(background-color, $transition-fast);
+    @include transition-base(color, $transition-fast);
+
+    &:hover {
+      color: $text-primary;
+    }
+
+    &--active {
+      background-color: $primary-color;
+      color: $text-inverse;
+
+      &:hover {
+        background-color: $primary-hover;
+        color: $text-inverse;
+      }
+    }
+  }
+
+  &__mode-btn-icon {
+    width: 14px;
+    height: 14px;
+  }
+
+  // 手机外框子样式切换：拟真 / 简洁
+  &__sub-switch {
+    display: inline-flex;
+    align-items: stretch;
+    padding: 2px;
+    background-color: $bg-tertiary;
+    border-radius: $radius-md;
+    gap: 2px;
+  }
+
+  &__sub-btn {
+    padding: $spacing-xs $spacing-sm;
+    background-color: transparent;
+    color: $text-secondary;
+    font-size: $font-size-xs;
+    font-weight: $font-weight-medium;
+    border-radius: $radius-sm;
+    @include transition-base(background-color, $transition-fast);
+    @include transition-base(color, $transition-fast);
+
+    &:hover {
+      color: $text-primary;
+    }
+
+    &--active {
+      background-color: $primary-color;
+      color: $text-inverse;
+
+      &:hover {
+        background-color: $primary-hover;
+        color: $text-inverse;
+      }
+    }
   }
 
   &__action-btn {
@@ -102,6 +181,17 @@
     object-fit: contain;
     border-radius: $radius-md;
     animation: imageZoomIn $transition-normal forwards;
+
+    // 手机模式下图片完整显示在手机屏幕中（不裁切），屏幕黑边作为留白
+    // 这样用户可以真实看到图片在手机上的字体大小与排版效果
+    &--in-phone {
+      width: 100%;
+      height: 100%;
+      max-width: none;
+      max-height: none;
+      object-fit: contain;
+      border-radius: 0;
+    }
   }
 
   &__error {
@@ -116,6 +206,86 @@
     color: $text-inverse;
     text-align: center;
     line-height: 1.6;
+
+    // 手机模式下错误态占满屏幕区域
+    &--in-phone {
+      width: 100%;
+      height: 100%;
+      min-width: 0;
+      min-height: 0;
+      max-width: none;
+      max-height: none;
+      border-radius: 0;
+      border: none;
+      background-color: rgba(0, 0, 0, 0.6);
+    }
+  }
+
+  // 手机模式容器：参照真实 iPhone 在桌面显示器上的"视觉尺寸"展示
+  // 真实 iPhone 15 宽度约 71mm，在 96 DPI 显示器上约等于 268px CSS 像素
+  // 选用 280px 作为基础宽度，并通过 max-height 反推宽度，确保小窗口下按比例缩小
+  &__phone {
+    position: relative;
+    @include flex-center;
+    width: min(280px, calc((90vh - 200px) * 9 / 19.5));
+    aspect-ratio: 9 / 19.5;
+    animation: scaleIn $transition-normal forwards;
+  }
+
+  // 手机外框：拟真（默认）含刘海与 Home Indicator；简洁（--simple）仅圆角边框
+  &__phone-frame {
+    position: relative;
+    width: 100%;
+    height: 100%;
+    background: linear-gradient(145deg, #1f2937, #0b1220);
+    border-radius: 48px;
+    padding: 12px;
+    box-shadow: $shadow-xl;
+    display: flex;
+    align-items: stretch;
+    justify-content: stretch;
+
+    &--simple {
+      background: #111827;
+      border-radius: 32px;
+      padding: 8px;
+      box-shadow: $shadow-lg;
+    }
+  }
+
+  // 拟真模式专属：刘海
+  &__phone-notch {
+    position: absolute;
+    top: 12px;
+    left: 50%;
+    transform: translateX(-50%);
+    width: 120px;
+    height: 28px;
+    background-color: #000;
+    border-radius: 0 0 16px 16px;
+    z-index: 2;
+  }
+
+  // 拟真模式专属：Home Indicator
+  &__phone-home-indicator {
+    position: absolute;
+    bottom: 18px;
+    left: 50%;
+    transform: translateX(-50%);
+    width: 120px;
+    height: 4px;
+    background-color: rgba(255, 255, 255, 0.7);
+    border-radius: 2px;
+    z-index: 2;
+  }
+
+  // 屏幕区：实际显示图片的区域，模拟手机屏幕
+  &__phone-screen {
+    position: relative;
+    flex: 1;
+    overflow: hidden;
+    background-color: #000;
+    border-radius: 36px;
   }
 
   &__close {
@@ -166,6 +336,12 @@
     height: 14px;
     opacity: 0.7;
   }
+}
+
+// 简洁外框下屏幕圆角略小，与较小的外框 padding 协调
+// 写在 .image-preview 块外，避免 SCSS 嵌套自动拼接为错误的祖先选择器
+.image-preview__phone-frame--simple .image-preview__phone-screen {
+  border-radius: 24px;
 }
 
 @keyframes fadeIn {

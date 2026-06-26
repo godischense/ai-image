@@ -106,7 +106,12 @@
     position: absolute;
     top: calc(100% + 4px);
     left: 0;
+    // 宽度根据最长的文件夹名自适应，确保至少能显示4个字
+    // 实现逻辑：min-width 兜底短名（"全部图片"），max-content 跟随长名展开，
+    //           max-width 防止超长名撑爆页面并触发省略号
     min-width: 200px;
+    width: max-content;
+    max-width: 360px;
     max-height: 280px;
     overflow-y: auto;
     background: $color-bg-card;
@@ -140,6 +145,16 @@
       height: 14px;
       color: $color-text-tertiary;
       flex-shrink: 0;
+    }
+
+    // 文件夹名称 span：单行省略，避免名字过长时折行
+    >span:not(.image-library__folder-option-count):not(.image-library__folder-option-delete) {
+      flex: 1;
+      min-width: 0;
+      white-space: nowrap;
+      overflow: hidden;
+      text-overflow: ellipsis;
+      text-align: left;
     }
 
     &--active {
@@ -251,6 +266,31 @@
         border-color: rgba($danger-color, 0.3);
       }
     }
+  }
+
+  &__creator-select {
+    position: relative;
+    display: flex;
+    align-items: center;
+    gap: $spacing-xs;
+    padding: $spacing-xs $spacing-sm;
+    background: $color-bg-secondary;
+    border: 1px solid $color-border;
+    border-radius: $radius-md;
+    color: $color-text-secondary;
+    font-size: $font-size-xs;
+    font-weight: 500;
+    cursor: pointer;
+    transition: all $transition-fast;
+
+    &:hover {
+      border-color: $text-tertiary;
+      color: $color-text-primary;
+    }
+  }
+
+  &__creator-select-wrapper {
+    min-width: 120px;
   }
 
   &__sort-select {
@@ -616,7 +656,7 @@
   }
 }
 
-.image-card {
+.create-view .image-library .image-card {
   position: relative;
   background: $color-bg-card;
   border-radius: $radius-xl;

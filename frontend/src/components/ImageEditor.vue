@@ -3,7 +3,7 @@
   <div class="image-editor">
     <div class="image-editor__header">
       <h2 class="image-editor__title">编辑指令</h2>
-      <div v-if="selectedApiProvider !== 'fal'" class="image-editor__mode-toggle">
+      <div v-if="selectedApiProvider !== 'fal' && selectedApiProvider !== 'apiyi'" class="image-editor__mode-toggle">
         <span :class="{ 'u-text-primary': !isAsync }">同步</span>
         <button
           class="image-editor__toggle-switch"
@@ -37,12 +37,26 @@
           >
             <option value="openai">OpenAI 兼容</option>
             <option v-if="hasFalApiKey" value="fal">Fal API</option>
+            <option v-if="hasApiyiApiKey" value="apiyi">APIYI</option>
           </select>
         </div>
       </div>
 
       <div class="image-editor__options">
         <div class="image-editor__option-row">
+          <div v-if="selectedApiProvider === 'apiyi'" class="image-editor__option-group">
+            <label class="image-editor__option-label">模型</label>
+            <select
+              v-model="selectedModel"
+              class="image-editor__option-select"
+              :disabled="loading"
+            >
+              <option v-for="model in modelOptions" :key="model.value" :value="model.value">
+                {{ model.label }}
+              </option>
+            </select>
+          </div>
+
           <div class="image-editor__option-group">
             <label class="image-editor__option-label">尺寸比例</label>
             <select
@@ -56,14 +70,14 @@
             </select>
           </div>
 
-          <div class="image-editor__option-group">
+          <div v-if="!isApiyiGptImage2Vip" class="image-editor__option-group">
             <label class="image-editor__option-label">RES</label>
             <select
               v-model="selectedResolution"
               class="image-editor__option-select"
               :disabled="loading"
             >
-              <option v-for="resolution in resolutions" :key="resolution.value" :value="resolution.value">
+              <option v-for="resolution in currentResolutions" :key="resolution.value" :value="resolution.value">
                 {{ resolution.label }}
               </option>
             </select>
@@ -246,6 +260,7 @@
 import { ref, computed, watch } from 'vue'
 import { useConfigStore } from '@/stores/configStore'
 import { api } from '@/services/api'
+import { APIYI_ASPECT_RATIO_OPTIONS, APIYI_RESOLUTIONS, resolveApiyiSize } from '@/utils/apiyiOptions'
 import './ImageEditor.scss'
 
 const props = defineProps({
@@ -346,12 +361,18 @@ const sizeMap = {
   'fullscreen': { '1k': '688x1488', '2k': '1072x2336', '4k': '1760x3840' }
 }
 
-const aspectRatioOptions = computed(() => {
+const defaultAspectRatioOptions = computed(() => {
   return [
     { value: 'auto', label: '自动' },
     ...aspectRatios.map((ratio) => ({ value: ratio.value, label: ratio.value })),
     { value: 'fullscreen', label: '全屏' }
   ]
+})
+
+const aspectRatioOptions = computed(() => {
+  return selectedApiProvider.value === 'apiyi' && !isApiyiGptImage2.value
+    ? APIYI_ASPECT_RATIO_OPTIONS
+    : defaultAspectRatioOptions.value
 })
 
 const prompt = ref('')
@@ -362,6 +383,7 @@ const selectedResolution = ref('2K')
 const selectedQuality = ref('auto')
 // 当前选择的 API 提供者（openai 或 fal），从 localStorage 恢复
 const selectedApiProvider = ref(savedEditorPrefs.selectedApiProvider || 'openai')
+const selectedModel = ref(savedEditorPrefs.selectedModel || 'gpt-image-2')
 // Fal 模式下选中的生成数量
 const selectedNumImages = ref(1)
 // Fal 模式下选中的输出格式
@@ -373,9 +395,56 @@ const hasFalApiKey = computed(() => {
   return Boolean(configStore?.falApi?.apiKey?.trim())
 })
 
+// 判断是否已配置 APIYI API Key，用于控制 APIYI 选项的显示
+const hasApiyiApiKey = computed(() => {
+  return Boolean(configStore?.apiyiApi?.apiKey?.trim())
+})
+
 const loading = computed(() => props.submitting)
 
+const models = computed(() => {
+  if (selectedApiProvider.value === 'fal') {
+    return ['openai/gpt-image-2']
+  }
+  if (selectedApiProvider.value === 'apiyi') {
+    const configuredModels = Array.isArray(configStore.apiyiApi?.imageModels) && configStore.apiyiApi.imageModels.length > 0
+      ? configStore.apiyiApi.imageModels
+      : ['gpt-image-2-vip', 'gpt-image-2']
+    const mergedModels = Array.from(new Set([...configuredModels, 'gpt-image-2']))
+    return mergedModels.map(model => model.startsWith('apiyi/') ? model : `apiyi/${model}`)
+  }
+  return Array.isArray(configStore.imageApi?.imageModels) && configStore.imageApi.imageModels.length > 0
+    ? configStore.imageApi.imageModels
+    : ['gpt-image-2']
+})
+
+const modelOptions = computed(() => {
+  return models.value.map(model => ({ value: model, label: model }))
+})
+
+const isApiyiGptImage2 = computed(() => {
+  return selectedApiProvider.value === 'apiyi' && selectedModel.value.replace('apiyi/', '') === 'gpt-image-2'
+})
+
+const isApiyiGptImage2Vip = computed(() => {
+  return selectedApiProvider.value === 'apiyi' && selectedModel.value.replace('apiyi/', '') === 'gpt-image-2-vip'
+})
+
+const currentResolutions = computed(() => {
+  if (isApiyiGptImage2Vip.value) {
+    return []
+  }
+  if (selectedApiProvider.value === 'apiyi' && !isApiyiGptImage2.value) {
+    return APIYI_RESOLUTIONS
+  }
+  return resolutions
+})
+
 const resolvedSize = computed(() => {
+  if (selectedApiProvider.value === 'apiyi' && !isApiyiGptImage2.value) {
+    return resolveApiyiSize(selectedAspectRatio.value, selectedResolution.value)
+  }
+
   if (selectedAspectRatio.value === 'auto') {
     return 'auto'
   }
@@ -428,11 +497,15 @@ const handleEdit = async () => {
         : resolvedSize.value
     }
 
+    // APIYI 视为异步执行：强制 async=true 走后台线程任务卡
+    // Fal 同样强制异步；其他端口使用用户切换的状态
+    const isApiyiSelected = selectedApiProvider.value === 'apiyi'
     emit('edit', {
       imageSrc: imageSrc.value,
       prompt: prompt.value,
       api_provider: selectedApiProvider.value,
-      isAsync: selectedApiProvider.value === 'fal' ? true : isAsync.value,
+      model: selectedModel.value,
+      isAsync: (selectedApiProvider.value === 'fal' || isApiyiSelected) ? true : isAsync.value,
       size: sizeValue,
       quality: selectedQuality.value,
       referenceImages: referenceImages.value,
@@ -449,13 +522,14 @@ const handleReset = () => {
   prompt.value = ''
   error.value = ''
   selectedApiProvider.value = 'openai'
+  selectedModel.value = models.value[0] || 'gpt-image-2'
   selectedAspectRatio.value = 'auto'
   selectedResolution.value = '2K'
   selectedNumImages.value = 1
   selectedOutputFormat.value = 'png'
   selectedQuality.value = 'auto'
   referenceImages.value = []
-  saveEditorPrefs({ selectedApiProvider: 'openai' })
+  saveEditorPrefs({ selectedApiProvider: 'openai', selectedModel: selectedModel.value })
   emit('reset')
 }
 
@@ -544,9 +618,30 @@ watch(() => props.submitError, (newVal) => {
   error.value = newVal || ''
 }, { immediate: true })
 
-// API 提供者变化时保存到 localStorage
+// API 提供者变化时保存到 localStorage；APIYI 同步强制异步模式
 watch(selectedApiProvider, (val) => {
   saveEditorPrefs({ selectedApiProvider: val })
+  if (!models.value.includes(selectedModel.value)) {
+    selectedModel.value = models.value[0] || 'gpt-image-2'
+  }
+  if (val === 'apiyi' && !aspectRatioOptions.value.some(option => option.value === selectedAspectRatio.value)) {
+    selectedAspectRatio.value = 'auto'
+  }
+  // APIYI 视为异步执行：UI 隐藏切换按钮后，确保内部状态为 true
+  if (val === 'apiyi') {
+    isAsync.value = true
+    emit('async-change', true)
+  }
+})
+
+watch(selectedModel, (val) => {
+  saveEditorPrefs({ selectedModel: val })
+})
+
+watch(currentResolutions, (options) => {
+  if (options.length > 0 && !options.some(option => option.value === selectedResolution.value)) {
+    selectedResolution.value = options[0].value
+  }
 })
 
 const setImage = (src) => {

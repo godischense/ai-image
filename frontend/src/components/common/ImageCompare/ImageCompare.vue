@@ -13,11 +13,11 @@
         @mousemove="updatePos"
         @touchmove.prevent="updatePos"
       >
-        <img :src="originalImage?.url || newImage.url" class="image-compare__img" />
+        <img :src="newImage.url" class="image-compare__img" />
         <img
-          :src="newImage.url"
+          :src="originalImage?.url || newImage.url"
           class="image-compare__img image-compare__img--top"
-          :style="{ clipPath: `inset(0 ${100 - sliderPos}% 0 0)` }"
+          :style="{ clipPath: `inset(0 0 0 ${sliderPos}%)` }"
         />
         <div class="image-compare__line" :style="{ left: sliderPos + '%' }">
           <div class="image-compare__handle">
@@ -28,8 +28,8 @@
         </div>
       </div>
       <div class="image-compare__labels">
-        <span class="image-compare__label image-compare__label--left">编辑后</span>
-        <span class="image-compare__label image-compare__label--right">原图</span>
+        <span class="image-compare__label image-compare__label--left">{{ leftLabel }}</span>
+        <span class="image-compare__label image-compare__label--right">{{ rightLabel }}</span>
       </div>
     </div>
   </Teleport>
@@ -40,7 +40,9 @@ import { ref, onMounted, onUnmounted } from 'vue'
 
 const props = defineProps({
   newImage: { type: Object, required: true },
-  originalImage: { type: Object, default: null }
+  originalImage: { type: Object, default: null },
+  leftLabel: { type: String, default: '编辑后' },
+  rightLabel: { type: String, default: '原图' }
 })
 
 const emit = defineEmits(['close'])
@@ -117,6 +119,7 @@ onUnmounted(() => {
     cursor: col-resize;
     user-select: none;
     -webkit-user-select: none;
+    overflow: hidden;
   }
 
   &__img {
@@ -129,6 +132,11 @@ onUnmounted(() => {
       position: absolute;
       top: 0;
       left: 0;
+      width: 100%;
+      height: 100%;
+      max-width: none;
+      max-height: none;
+      object-fit: fill;
     }
   }
 

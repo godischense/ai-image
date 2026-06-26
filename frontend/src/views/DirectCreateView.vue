@@ -30,7 +30,9 @@
           @select-folder="handleSelectFolder"
           @enter-recycle-bin="handleEnterRecycleBin"
           @add-to-preparation="handleAddToPreparation"
+          @add-to-geo="handleAddToGeo"
           @gptsapi-retry="handleGptsapiRetry"
+          @apiyi-retry="handleApiyiRetry"
         />
       </div>
     </div>
@@ -79,11 +81,12 @@
 import { ref, computed, onMounted, onUnmounted, nextTick, watch } from 'vue'
 import { useRouter } from 'vue-router'
 import { useImageStore } from '@/stores/imageStore'
-import { queryTask, downloadImage, renameImage, refreshImage, gptsapiRetry, getFolderImages, api } from '@/services/api'
+import { queryTask, downloadImage, renameImage, refreshImage, gptsapiRetry, getFolderImages, getUnassignedImages, api } from '@/services/api'
 import ImageGenerator from '@/components/ImageGenerator.vue'
 import ImageLibrary from '@/components/ImageLibrary.vue'
 import ImagePreview from '@/components/ImagePreview.vue'
 import ConfirmDialog from '@/components/common/ConfirmDialog/ConfirmDialog.vue'
+import { formatApiSourceLabel } from '@/utils/platformDisplay'
 
 const router = useRouter()
 const imageStore = useImageStore()
@@ -95,8 +98,10 @@ const generatingCardIds = ref([])
 const generatingTaskId = ref(null)
 
 // 初始化时读取 localStorage 中保存的文件夹，直接进入对应视图
+// 默认进入「未分配」虚拟文件夹
+// 实现逻辑：保留「全部图片」作为可选项，但首屏直接定位到未分配的图
 const savedFolder = typeof window !== 'undefined' ? localStorage.getItem('image-library-folder') : null
-const currentFolderId = ref(savedFolder && savedFolder !== 'recycle' ? savedFolder : 'all')
+const currentFolderId = ref(savedFolder && savedFolder !== 'recycle' ? savedFolder : 'unassigned')
 const folderImages = ref(null)
 const isFolderLoading = ref(false)
 
@@ -343,12 +348,14 @@ const parsePayloadSize = (size) => {
   return { displaySize: String(size), aspectRatio: null }
 }
 
-const handleGenerateStart = ({ payload, isAsync }) => {
+const handleGenerateStart = ({ payload, isAsync, creator }) => {
   // 根据 payload.n 或 payload.num_images（Fal 模式）确定生成数量
   const imageCount = payload.n || payload.num_images || 1
   generatingCardIds.value = []
 
   const { displaySize, aspectRatio } = parsePayloadSize(payload.size)
+  // 制作人：从 emit('generate-start') 透传过来的本地属性；空值时保存空串，保留字段存在
+  const currentCreator = (creator || '').trim()
 
   for (let i = 0; i < imageCount; i++) {
     const cardId = `generating-${Date.now()}-${i}`
@@ -372,14 +379,15 @@ const handleGenerateStart = ({ payload, isAsync }) => {
       imageType: 'generation',
       url: '',
       thumbnail: '',
-      error: ''
+      error: '',
+      creator: currentCreator
     })
   }
 }
 
 const handleGenerate = async (result) => {
   console.log('[DirectCreateView] handleGenerate received:', JSON.stringify({ task_id: result?.response?.task_id, size: result?.payload?.size }, null, 2))
-  const { response, payload, isAsync } = result || {}
+  const { response, payload, isAsync, creator } = result || {}
   if (!response || !payload) {
     console.error('handleGenerate: 无效的 generate 事件参数', result)
     return
@@ -387,6 +395,8 @@ const handleGenerate = async (result) => {
 
   const taskId = response?.task_id
   const { displaySize, aspectRatio } = parsePayloadSize(payload.size)
+  // 制作人：从 emit('generate') 透传过来的本地属性；空值时保存空串，保留字段存在
+  const currentCreator = (creator || '').trim()
 
   if (isAsync) {
     // 异步模式：所有占位卡片标记为 IN_PROGRESS，启动轮询
@@ -409,7 +419,8 @@ const handleGenerate = async (result) => {
         imageType: 'generation',
         url: '',
         thumbnail: '',
-        error: ''
+        error: '',
+        creator: currentCreator
       })
     })
 
@@ -447,7 +458,8 @@ const handleGenerate = async (result) => {
             imageType: 'generation',
             url: img.display_url || img.url || '',
             thumbnail: img.thumbnail || '',
-            error: ''
+            error: '',
+            creator: currentCreator
           })
         }
       }
@@ -472,7 +484,8 @@ const handleGenerate = async (result) => {
         imageType: 'generation',
         url: firstImage.display_url || firstImage.url || '',
         thumbnail: firstImage.thumbnail || '',
-        error: ''
+        error: '',
+        creator: currentCreator
       })
     }
   }
@@ -528,8 +541,13 @@ const handleImageDelete = async (imageId) => {
   }
 }
 
+// 将图片设为参考图，不再跳转编辑页
 const handleImageEdit = (image) => {
-  router.push(`/edit/${image.id}`)
+  imageGeneratorRef.value?.addReferenceImage({
+    url: image.url || image.src || image.thumbnail,
+    id: image.id,
+    name: image.title || image.prompt || '参考图'
+  })
 }
 
 const handleImageRename = async (image) => {
@@ -587,6 +605,28 @@ const handleSelectFolder = async (folderId) => {
     imageStore.fetchImages()
     return
   }
+  // 「未分配」虚拟文件夹：调用后端专用接口
+  // 实现逻辑：未分配不是 folders 表中的真实记录，必须走后端 /api/folders/unassigned/images
+  //   兜底：getUnassignedImages 失败时把 folderImages 设为空数组，保证 UI 不卡死
+  if (folderId === 'unassigned') {
+    try {
+      const result = await getUnassignedImages()
+      if (result?.success && Array.isArray(result.data)) {
+        folderImages.value = result.data.map((img) => ({
+          ...img,
+          url: img.url || img.local_url || '',
+          thumbnail: img.thumbnail || img.preview_url || '',
+          local_path: img.local_path || img.local_url || ''
+        }))
+      } else {
+        folderImages.value = []
+      }
+    } catch (e) {
+      console.error('获取未分配图片失败:', e)
+      folderImages.value = []
+    }
+    return
+  }
   try {
     const result = await getFolderImages(folderId)
     if (result?.success && result?.data) {
@@ -617,16 +657,19 @@ const handleAddToPreparation = (image) => {
     cancelText: '取消',
     onConfirm: async () => {
       const displayName = image.title || image.display_name || image.prompt?.slice(0, 30) || ''
-      const platform = image.apiSource === 'fal' ? 'Fal' : image.apiSource === 'gptsapi' ? 'GPTsAPI' : 'T8'
+      const platform = formatApiSourceLabel(image.apiSource)
       const copyText = image.prompt || ''
       const posterCopy = image.poster_copy || ''
+      // 制作人：随图片一起透传到后端，保存到 preparation_items.creator
+      const creatorValue = (image.creator || '').trim()
       try {
         await api.post('/api/preparation/copy-from', {
           image_url: imageUrl,
           display_name: displayName,
           platform: platform,
           copy_text: copyText,
-          poster_copy: posterCopy
+          poster_copy: posterCopy,
+          creator: creatorValue
         })
         openConfirmDialog({
           title: '添加成功',
@@ -649,10 +692,57 @@ const handleAddToPreparation = (image) => {
   })
 }
 
-const handleRefresh = () => {
-  currentFolderId.value = 'all'
+const handleAddToGeo = (image) => {
+  const imageUrl = image.url || image.thumbnail || ''
+  if (!imageUrl) return
+  openConfirmDialog({
+    title: '确认添加',
+    message: '确定要将此图片添加到GEO目录吗？',
+    confirmText: '确定',
+    cancelText: '取消',
+    onConfirm: async () => {
+      const displayName = image.title || image.display_name || image.prompt?.slice(0, 30) || ''
+      const platform = formatApiSourceLabel(image.apiSource)
+      const copyText = image.prompt || ''
+      const posterCopy = image.poster_copy || ''
+      // 制作人：随图片一起透传到后端，保存到 geo_items.creator
+      const creatorValue = (image.creator || '').trim()
+      try {
+        await api.post('/api/geo/copy-from', {
+          image_url: imageUrl,
+          display_name: displayName,
+          platform: platform,
+          copy_text: copyText,
+          poster_copy: posterCopy,
+          creator: creatorValue
+        })
+        router.push('/geo')
+      } catch (e) {
+        openConfirmDialog({
+          title: '添加失败',
+          message: '添加到GEO目录失败：' + (e.message || '未知错误'),
+          confirmText: '确定',
+          cancelText: '',
+          danger: true,
+          onConfirm: () => {}
+        })
+      }
+    }
+  })
+}
+
+const handleRefresh = async () => {
+  // 保留当前文件夹视图，避免移动图片后被强制跳到"全部图片"
+  // 实现逻辑：根据 currentFolderId 重新拉取对应视图的数据
+  //   兜底：folderImages 清空，避免界面短暂展示旧数据
   folderImages.value = null
-  imageStore.fetchImages()
+  if (currentFolderId.value === 'all') {
+    imageStore.fetchImages()
+    return
+  }
+  // 当前是「未分配」或某个真实文件夹，复用 handleSelectFolder 重新拉取
+  // 实现逻辑：避免在 refresh 中重复构造 getUnassignedImages 逻辑
+  await handleSelectFolder(currentFolderId.value)
 }
 
 const handleImageRefresh = async (image) => {
@@ -744,6 +834,73 @@ const handleGptsapiRetry = async (image) => {
       confirmText: '确定',
       cancelText: '',
       danger: true,
+      onConfirm: () => {}
+    })
+  }
+}
+
+// APIYI 失败任务重试
+// 功能描述：
+//     调后端 /api/images/apiyi/retry 把失败的 task 重新提交；成功则把 image 状态翻回 generating
+// 实现逻辑：
+//     1. 取 task_id（兼容 snake/camel）
+//     2. POST { task_id } 到重试接口
+//     3. ok=true：imageStore.upsertImage 翻 generating=true + 清 error，重新启动轮询
+//     4. ok=false：confirmDialog 展示 error_code + error，提示用户重新提交
+// 异常处理：网络/JSON 异常 confirmDialog 兜底；image 状态不动
+const handleApiyiRetry = async (image) => {
+  const taskId = image?.task_id || image?.taskId
+  if (!taskId) {
+    openConfirmDialog({
+      title: '无法重试',
+      message: '该图片没有关联的 task_id，请重新生成',
+      confirmText: '确定',
+      cancelText: '',
+      onConfirm: () => {}
+    })
+    return
+  }
+  try {
+    const resp = await fetch('/api/images/apiyi/retry', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ task_id: taskId })
+    })
+    const data = await resp.json().catch(() => ({}))
+    if (resp.ok && data.ok) {
+      imageStore.upsertImage({
+        id: image.id,
+        task_id: taskId,
+        status: 'IN_PROGRESS',
+        generating: true,
+        error: '',
+        apiyiRetryCount: (image.apiyiRetryCount || 0) + 1
+      })
+      startPolling(taskId)
+      return
+    }
+    const errCode = data.error_code || 'unknown'
+    const errMsg = data.error || `重试请求失败 (HTTP ${resp.status})`
+    const hint = errCode === 'temp_files_missing'
+      ? '临时文件已失效，请直接重新提交任务'
+      : errCode === 'image_missing'
+        ? '图片记录已不存在，请重新提交'
+        : errCode === 'status_not_failure'
+          ? '该任务状态已变化，请刷新页面查看'
+          : errMsg
+    openConfirmDialog({
+      title: '重试失败',
+      message: `${hint}\n\n错误码：${errCode}`,
+      confirmText: '确定',
+      cancelText: '',
+      onConfirm: () => {}
+    })
+  } catch (err) {
+    openConfirmDialog({
+      title: '重试异常',
+      message: `网络异常：${err?.message || err}`,
+      confirmText: '确定',
+      cancelText: '',
       onConfirm: () => {}
     })
   }

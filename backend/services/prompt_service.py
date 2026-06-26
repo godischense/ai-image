@@ -235,7 +235,10 @@ class PromptService:
 
     def _optimize_via_responses(self, prompt: str, enable_web_search: bool, retry_count: int = 0) -> Dict[str, Any]:
         """使用 Responses (v1/responses) 模式优化提示词"""
-        url = f"{self.api_base_url}/v1/responses"
+        if self.provider == 'volcengine':
+            url = self.api_base_url
+        else:
+            url = f"{self.api_base_url}/v1/responses"
 
         headers = {
             'Content-Type': 'application/json',
@@ -245,7 +248,7 @@ class PromptService:
             'Authorization': f'Bearer {self.api_key}'
         }
 
-        input_messages = [
+        input_messages = prompt.strip() if self.provider == 'volcengine' else [
             {'role': 'user', 'content': prompt.strip()}
         ]
 

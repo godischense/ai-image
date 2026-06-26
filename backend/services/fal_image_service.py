@@ -4,12 +4,26 @@ import json
 from typing import Optional, List, Dict, Any
 
 
+def _format_http_error(error: requests.exceptions.RequestException) -> str:
+    """
+    Build a concise error string that preserves upstream response details.
+    """
+    response = getattr(error, "response", None)
+    if response is None:
+        return str(error)
+
+    body = (response.text or "").strip()
+    if len(body) > 1000:
+        body = body[:1000] + "..."
+    return f"HTTP {response.status_code}: {body or str(error)}"
+
+
 class FalImageService:
     """
     fal.ai 图片生成与编辑服务
 
     功能描述：
-        通过代理地址 https://ai.t8star.cn/fal 与 fal.ai 队列 API 通信，
+        通过用户在设置中配置的代理地址与 fal.ai 队列 API 通信（不再提供硬编码兜底），
         支持提交生图任务、编辑任务、查询任务状态以及获取任务结果。
         所有请求使用 Bearer 开头的 Authorization 头进行鉴权。
 
@@ -19,16 +33,21 @@ class FalImageService:
         3. 查询状态和结果时优先使用 API 返回的 response_url（做代理地址替换），回退到手动构造 URL
         4. 所有 HTTP 请求均包含 try/except 兜底，失败时返回 {"error": str(e)}
         5. 支持 base64 和 image_url 两种图片传参方式
+        6. 若调用方未提供有效 base_url，构造时直接抛错，避免在请求阶段才发现配置缺失
     """
 
-    def __init__(self, api_key: str):
+    def __init__(self, api_key: str, base_url: str = None):
         self.api_key = api_key
-        self.base_url = "https://ai.t8star.cn/fal"
+        # 不再提供硬编码兜底：base_url 为空时直接抛错，由调用方在配置缺失时给出明确提示
+        cleaned_base_url = (base_url or "").strip().rstrip("/")
+        if not cleaned_base_url:
+            raise ValueError("FAL Base URL 未配置，请在【设置 -> Fal API 设置】中填写")
+        self.base_url = cleaned_base_url
         self.timeout = 300
 
     # 解析轮询 URL，优先使用 API 返回的 response_url
     # 功能描述：
-    #     将 API 返回的 response_url 进行代理地址替换（queue.fal.run → ai.t8star.cn/fal）
+    #     将 API 返回的 response_url 进行代理地址替换（queue.fal.run → 用户配置的 base_url）
     #     如果 response_url 无效，回退到手动构造 URL
     def _resolve_poll_url(self, response_url: str, model: str, request_id: str, suffix: str = "") -> str:
         if response_url:
@@ -53,7 +72,7 @@ class FalImageService:
     def upload_image_to_url(self, image_data: bytes, filename: str = "image.png") -> Optional[str]:
         try:
             # 从 self.base_url 中提取基础域名（去掉 /fal 结尾）
-            # self.base_url = "https://ai.t8star.cn/fal" → "https://ai.t8star.cn"
+            # 例如 https://your-host.com/fal → https://your-host.com
             upload_base = self.base_url.rstrip('/')
             if upload_base.endswith('/fal'):
                 upload_base = upload_base[:-4]
@@ -150,8 +169,9 @@ class FalImageService:
                   f"has_response_url={'response_url' in result}")
             return result
         except requests.exceptions.RequestException as e:
-            print(f"[FalImageService] Submit generation error: {str(e)}")
-            return {'error': str(e)}
+            error_message = _format_http_error(e)
+            print(f"[FalImageService] Submit generation error: {error_message}")
+            return {'error': error_message}
 
     # 提交图片编辑任务到 fal.ai 队列
     # 功能描述：
@@ -209,8 +229,9 @@ class FalImageService:
                   f"has_response_url={'response_url' in result}")
             return result
         except requests.exceptions.RequestException as e:
-            print(f"[FalImageService] Submit edit error: {str(e)}")
-            return {'error': str(e)}
+            error_message = _format_http_error(e)
+            print(f"[FalImageService] Submit edit error: {error_message}")
+            return {'error': error_message}
 
     # 查询任务在 fal.ai 队列中的当前状态
     # 改进：不再使用 raise_for_status() 吞噬响应体
@@ -311,8 +332,9 @@ class FalImageService:
             print(f"[FalImageService] Task {request_id} result: images={image_count}, prompt={result.get('prompt', 'N/A')[:50]}...")
             return result
         except requests.exceptions.RequestException as e:
-            print(f"[FalImageService] Get task result error: {str(e)}")
-            return {'error': str(e)}
+            error_message = _format_http_error(e)
+            print(f"[FalImageService] Get task result error: {error_message}")
+            return {'error': error_message}
 
     # 将 fal.ai 原始状态映射为标准化状态字符串
     @staticmethod

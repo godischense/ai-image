@@ -20,13 +20,25 @@ from .database import get_db_connection
 
 logger = logging.getLogger(__name__)
 
-CONFIG_KEYS = ('image_api', 'server', 'prompt_optimize', 'fal_api', 'gptsapi_api', 'file_upload', 'social_copy_api', 'topaz_gigapixel')
+CONFIG_KEYS = ('image_api', 'server', 'prompt_optimize', 'fal_api', 'gptsapi_api', 'apiyi_api', 'file_upload', 'social_copy_api', 'topaz_gigapixel', 'edit_prompt_snippets', 'prompt_transform', 'creator_options', 'image_library_creator_filter')
 DEFAULT_CONFIGS = {
+    # T8 平台图像生成 API 与余额查询共用 baseUrl：
+    #   baseUrl   - 文生图/编辑（OpenAI 兼容）和余额查询（/api/user/self）共用同一域名
+    #   apiKey    - 文生图/编辑使用的 API Key（与余额查询无关）
+    #   isAsync   - 业务层默认走异步任务（保留扩展位）
+    #   imageModels - 可用图像模型列表
+    #   balanceToken     - 余额查询接口的 Bearer Token（T8 个人中心生成"系统令牌"）
+    #   balanceUserId    - 余额查询接口的 New-API-User 请求头
+    #   balanceRefreshIntervalMinutes - 头部自动刷新余额的间隔（分钟，>=1）
+    # balanceField 固定为 'quota'，balanceDivider 固定为 500000，写在后端代码里、不暴露给用户
     'image_api': {
         'baseUrl': 'https://api.openai.com',
         'apiKey': '',
         'isAsync': False,
-        'imageModels': ['gpt-image-2', 'dall-e-3']
+        'imageModels': ['gpt-image-2', 'dall-e-3'],
+        'balanceToken': '',
+        'balanceUserId': '',
+        'balanceRefreshIntervalMinutes': 5
     },
     'server': {
         'port': 5678
@@ -36,6 +48,20 @@ DEFAULT_CONFIGS = {
         'apiKey': '',
         'model': 'gpt-4o',
         'systemPrompt': '你是一个专业的图像提示词优化专家。请将用户输入的提示词优化为更详细、更适合图像生成的描述。优化后的提示词应该：1. 更具体清晰 2. 包含更多细节描述 3. 适合作为图像生成的输入。请直接返回JSON格式：{"optimized_prompt": "优化后的提示词内容"}，不要包含任何其他内容或解释。',
+        'provider': 'openai',
+        'mode': 'chat',
+        'enableWebSearch': False,
+        'deepseekApiKey': '',
+        'deepseekModel': 'deepseek-v4-pro',
+        'thinkingEnabled': False,
+        'reasoningEffort': 'high',
+        'xiaomiApiKey': '',
+        'xiaomiModel': 'mimo-v2.5-pro',
+        'xiaomiThinkingEnabled': False,
+        'xiaomiEnableWebSearch': False,
+        'volcengineBaseUrl': 'https://ark.cn-beijing.volces.com/api/v3/responses',
+        'volcengineApiKey': '',
+        'volcengineModel': 'doubao-seed-2-1-pro-260628',
         'systemPrompts': [
             {
                 'id': 'default',
@@ -46,21 +72,39 @@ DEFAULT_CONFIGS = {
         'selectedSystemPromptId': 'default'
     },
     'fal_api': {
+        'baseUrl': '',
         'apiKey': '',
-        'falModels': ['openai/gpt-image-2', 'openai/gpt-image-2/edit']
+        'falModels': ['openai/gpt-image-2']
     },
     'gptsapi_api': {
         'baseUrl': 'https://api.gptsapi.net',
         'apiKey': ''
+    },
+    # APIYI 端口配置：gpt-image-2-vip 文生图/编辑（按文档视为异步执行）
+    # 字段含义：
+    #   baseUrl      - APIYI 主域名（默认 https://api.apiyi.com），备选 vip.apiyi.com / b.apiyi.com
+    #   apiKey       - API易控制台获取的 Bearer Token（必填，未配置时无法调用）
+    #   imageModels  - 可用模型列表（默认 ['gpt-image-2-vip']，文档固定模型名）
+    #   accessToken  - 余额查询令牌（区别于 apiKey：apiKey 用于生图 Authorization: Bearer，
+    #                   accessToken 用于余额查询 Authorization: <token> 无 Bearer 前缀）
+    'apiyi_api': {
+        'baseUrl': 'https://api.apiyi.com',
+        'apiKey': '',
+        'imageModels': ['gpt-image-2-vip', 'gpt-image-2'],
+        'accessToken': ''
     },
     'file_upload': {
         'baseUrl': 'https://ai.t8star.cn',
         'apiKey': ''
     },
     'social_copy_api': {
+        'provider': 'openai',
         'baseUrl': '',
         'apiKey': '',
         'model': '',
+        'volcengineBaseUrl': 'https://ark.cn-beijing.volces.com/api/v3/responses',
+        'volcengineApiKey': '',
+        'volcengineModel': 'doubao-seed-2-1-pro-260628',
         'systemPrompt': ''
     },
     'topaz_gigapixel': {
@@ -83,6 +127,96 @@ DEFAULT_CONFIGS = {
         'maxParallel': 1,
         # 单图处理超时（秒）
         'timeout': 600
+    },
+    # 编辑指令预设片段：用户在设置页维护多条固定提示词片段，
+    # 编辑页可通过 popover 选择其中一条并追加到 editPrompt 末尾
+    # 每个片段必须包含 id（唯一）、name（显示名）、content（要追加的文本）三个字段
+    'edit_prompt_snippets': {
+        'snippets': [],
+        'selectedSnippetId': None
+    },
+    # 提示词改写：按媒体平台（公众号/小红书/短视频）独立配置 baseUrl/apiKey/model/systemPrompt
+    # 由 /api/prompt/transform-optimize 路由读取并组装 PromptService 调用大模型改写用户提示词
+    # 每个 item 必含字段：providerName / baseUrl / apiKey / model / systemPrompt
+    # 与前端 configStore.promptTransform.items 的三个键保持一致
+    'prompt_transform': {
+        'items': {
+            'officialAccount': {
+                'providerName': '',
+                'providerConfigs': {
+                    'OpenAI 兼容': {'providerKey': 'openai', 'baseUrl': '', 'apiKey': '', 'model': '', 'mode': 'chat'},
+                    'DeepSeek': {'providerKey': 'deepseek', 'baseUrl': 'https://api.deepseek.com', 'apiKey': '', 'model': 'deepseek-v4-pro', 'mode': 'chat'},
+                    'XIAOMI': {'providerKey': 'xiaomi', 'baseUrl': 'https://api.xiaomimimo.com', 'apiKey': '', 'model': 'mimo-v2.5-pro', 'mode': 'chat'},
+                    '火山引擎': {'providerKey': 'volcengine', 'baseUrl': 'https://ark.cn-beijing.volces.com/api/v3/responses', 'apiKey': '', 'model': 'doubao-seed-2-1-pro-260628', 'mode': 'responses'},
+                    '自定义': {'providerKey': 'openai', 'baseUrl': '', 'apiKey': '', 'model': '', 'mode': 'chat'}
+                },
+                'baseUrl': '',
+                'apiKey': '',
+                'model': '',
+                'systemPrompt': '',
+                'systemPrompts': [
+                    {
+                        'id': 'default',
+                        'name': '默认提示词',
+                        'content': ''
+                    }
+                ],
+                'selectedSystemPromptId': 'default'
+            },
+            'xiaohongshu': {
+                'providerName': '',
+                'providerConfigs': {
+                    'OpenAI 兼容': {'providerKey': 'openai', 'baseUrl': '', 'apiKey': '', 'model': '', 'mode': 'chat'},
+                    'DeepSeek': {'providerKey': 'deepseek', 'baseUrl': 'https://api.deepseek.com', 'apiKey': '', 'model': 'deepseek-v4-pro', 'mode': 'chat'},
+                    'XIAOMI': {'providerKey': 'xiaomi', 'baseUrl': 'https://api.xiaomimimo.com', 'apiKey': '', 'model': 'mimo-v2.5-pro', 'mode': 'chat'},
+                    '火山引擎': {'providerKey': 'volcengine', 'baseUrl': 'https://ark.cn-beijing.volces.com/api/v3/responses', 'apiKey': '', 'model': 'doubao-seed-2-1-pro-260628', 'mode': 'responses'},
+                    '自定义': {'providerKey': 'openai', 'baseUrl': '', 'apiKey': '', 'model': '', 'mode': 'chat'}
+                },
+                'baseUrl': '',
+                'apiKey': '',
+                'model': '',
+                'systemPrompt': '',
+                'systemPrompts': [
+                    {
+                        'id': 'default',
+                        'name': '默认提示词',
+                        'content': ''
+                    }
+                ],
+                'selectedSystemPromptId': 'default'
+            },
+            'shortVideo': {
+                'providerName': '',
+                'providerConfigs': {
+                    'OpenAI 兼容': {'providerKey': 'openai', 'baseUrl': '', 'apiKey': '', 'model': '', 'mode': 'chat'},
+                    'DeepSeek': {'providerKey': 'deepseek', 'baseUrl': 'https://api.deepseek.com', 'apiKey': '', 'model': 'deepseek-v4-pro', 'mode': 'chat'},
+                    'XIAOMI': {'providerKey': 'xiaomi', 'baseUrl': 'https://api.xiaomimimo.com', 'apiKey': '', 'model': 'mimo-v2.5-pro', 'mode': 'chat'},
+                    '火山引擎': {'providerKey': 'volcengine', 'baseUrl': 'https://ark.cn-beijing.volces.com/api/v3/responses', 'apiKey': '', 'model': 'doubao-seed-2-1-pro-260628', 'mode': 'responses'},
+                    '自定义': {'providerKey': 'openai', 'baseUrl': '', 'apiKey': '', 'model': '', 'mode': 'chat'}
+                },
+                'baseUrl': '',
+                'apiKey': '',
+                'model': '',
+                'systemPrompt': '',
+                'systemPrompts': [
+                    {
+                        'id': 'default',
+                        'name': '默认提示词',
+                        'content': ''
+                    }
+                ],
+                'selectedSystemPromptId': 'default'
+            }
+        }
+    },
+    # 制作人列表：用于生图/编辑页「制作人」下拉选项
+    # 用户在设置页「制作人列表」卡片中维护，最少保留 1 项
+    'creator_options': {
+        'options': ['李', '王苗', '王懿', '邢艳霞', '王龙']
+    },
+    # 图像生成页图片库「制作人」筛选持久化值
+    'image_library_creator_filter': {
+        'selectedCreator': ''
     }
 }
 
@@ -212,7 +346,7 @@ def get_single_config(config_key: str) -> Dict[str, Any]:
 # 获取全部配置模块
 #
 # 功能描述：
-#     一次性返回设置页所需的全部数据库配置。
+# 一次性返回设置页所需的全部数据库配置。
 def get_all_configs() -> Dict[str, Dict[str, Any]]:
     return {
         'image_api': get_single_config('image_api'),
@@ -220,7 +354,12 @@ def get_all_configs() -> Dict[str, Dict[str, Any]]:
         'prompt_optimize': get_single_config('prompt_optimize'),
         'fal_api': get_single_config('fal_api'),
         'gptsapi_api': get_single_config('gptsapi_api'),
+        'apiyi_api': get_single_config('apiyi_api'),
         'file_upload': get_single_config('file_upload'),
         'social_copy_api': get_single_config('social_copy_api'),
-        'topaz_gigapixel': get_single_config('topaz_gigapixel')
+        'topaz_gigapixel': get_single_config('topaz_gigapixel'),
+        'edit_prompt_snippets': get_single_config('edit_prompt_snippets'),
+        'prompt_transform': get_single_config('prompt_transform'),
+        'creator_options': get_single_config('creator_options'),
+        'image_library_creator_filter': get_single_config('image_library_creator_filter')
     }

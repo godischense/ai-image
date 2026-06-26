@@ -33,8 +33,8 @@ def sanitize_folder_name(name: str) -> str:
     # 去除首尾空白
     name = name.strip()
 
-    # 替换非法字符
-    illegal_chars = '<>:"/\\|?*'
+    # 替换非法字符（含换行、回车、制表符等在文件系统中无效的字符）
+    illegal_chars = '<>:"/\\|?*\n\r\t'
     for char in illegal_chars:
         name = name.replace(char, '_')
 

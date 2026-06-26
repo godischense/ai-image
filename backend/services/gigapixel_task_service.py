@@ -56,8 +56,6 @@ def _project_root():
 
 # gigapixel 输出目录（原图）
 GIGAPIXEL_OUTPUT_DIR = os.path.join(_project_root(), 'gigapixel_output')
-# gigapixel 缩略图目录
-GIGAPIXEL_THUMBNAILS_DIR = os.path.join(_project_root(), 'gigapixel_thumbnails')
 # per-task 临时输出子目录根（gigapixel.exe 写入这里）
 GIGAPIXEL_TEMP_ROOT = os.path.join(_project_root(), 'gigapixel_temp')
 
@@ -66,7 +64,7 @@ def _ensure_dirs():
     """
     确保 gigapixel 相关目录都存在。
     """
-    for d in (GIGAPIXEL_OUTPUT_DIR, GIGAPIXEL_THUMBNAILS_DIR, GIGAPIXEL_TEMP_ROOT):
+    for d in (GIGAPIXEL_OUTPUT_DIR, GIGAPIXEL_TEMP_ROOT):
         os.makedirs(d, exist_ok=True)
 
 
@@ -242,7 +240,25 @@ class GigapixelTaskService:
                 return
 
             # 执行放大
+            # 关键修复：gigapixel.exe 内部将命令行参数按 ANSI 代码页（CP936）转码，
+            # 中文路径（如 "2026年6月4日"）会变成乱码，导致 "文件不存在" 错误。
+            # 解决方案：将输入文件复制到纯 ASCII 路径（UUID 文件名），用该路径调用 gigapixel.exe。
+            # 复制到的目录：GIGAPIXEL_TEMP_ROOT/inputs/（每个任务一个独立子目录，自动清理）
+            input_copy_path = None
             try:
+                original_input = input_path
+                if not self._has_only_ascii_path(input_path):
+                    # 创建纯 ASCII 输入复制目录
+                    input_copy_dir = os.path.join(GIGAPIXEL_TEMP_ROOT, 'inputs', str(uuid.uuid4()))
+                    os.makedirs(input_copy_dir, exist_ok=True)
+                    ext = os.path.splitext(input_path)[1] or '.png'
+                    # 只含 ASCII 的文件名：input_{uuid_hex}{ext}
+                    safe_name = f'input_{uuid.uuid4().hex[:16]}{ext}'
+                    input_copy_path = os.path.join(input_copy_dir, safe_name)
+                    shutil.copy2(input_path, input_copy_path)
+                    print(f'[GigapixelTask] 复制到 ASCII 路径: {input_path} -> {input_copy_path}')
+                    input_path = input_copy_path
+
                 print(f'[GigapixelTask] Starting upscale for task_id={task_id}, input={input_path}')
                 used_settings, output_paths = service.upscale_one(
                     input_path=input_path,
@@ -254,6 +270,8 @@ class GigapixelTaskService:
             except Exception as e:
                 self._mark_task_failed(task_id, f'放大失败: {str(e)[:500]}')
                 self._safe_rmtree(temp_dir)
+                if input_copy_path:
+                    self._safe_rmtree(os.path.dirname(input_copy_path))
                 return
 
             # 检查任务是否被用户取消（取消优先）
@@ -265,7 +283,7 @@ class GigapixelTaskService:
 
             # 复制输出到 GIGAPIXEL_OUTPUT_DIR 并生成缩略图
             try:
-                final_filename, final_local_path, thumbnail_url, thumbnail_path = self._finalize_outputs(
+                final_filename, final_local_path = self._finalize_outputs(
                     task_id=task_id,
                     image_id=image_id,
                     output_paths=output_paths,
@@ -282,9 +300,9 @@ class GigapixelTaskService:
                     current_image = get_image_by_id(image_id)
                     if current_image:
                         current_image.url = f'/api/static/gigapixel_output/{final_filename}'
-                        current_image.thumbnail = thumbnail_url
+                        current_image.thumbnail = ''
                         current_image.local_path = final_local_path
-                        current_image.thumbnail_path = thumbnail_path
+                        current_image.thumbnail_path = ''
                         current_image.updated_at = time.strftime('%Y-%m-%dT%H:%M:%S')
                         update_image(current_image)
             except Exception as e:
@@ -301,8 +319,7 @@ class GigapixelTaskService:
                     'settings': used_settings,
                     'output_filename': final_filename,
                     'output_url': f'/api/static/gigapixel_output/{final_filename}',
-                    'thumbnail_url': thumbnail_url,
-                    'input_path': input_path,
+                    'input_path': original_input,  # 保存原始输入路径（非 ASCII 复制路径）
                     'output_path': final_local_path,
                 }
             )
@@ -311,24 +328,13 @@ class GigapixelTaskService:
             # 清理临时目录
             self._safe_rmtree(temp_dir)
 
-            # 清理本地上传文件（仅清理 gigapixel_temp/uploads 下的本地上传，保留图片库选择图）
-            # 判定方法：input_path 在 GIGAPIXEL_TEMP_ROOT/uploads/ 目录下
-            try:
-                upload_root = os.path.join(_project_root(), 'gigapixel_temp', 'uploads')
-                upload_root_abs = os.path.abspath(upload_root)
-                input_abs = os.path.abspath(input_path)
-                # Windows 路径比较忽略大小写
-                if os.path.commonpath([upload_root_abs, input_abs]).lower() == upload_root_abs.lower():
-                    if os.path.isfile(input_abs):
-                        os.remove(input_abs)
-                        print(f'[GigapixelTask] Cleaned uploaded input: {input_abs}')
-            except Exception as e:
-                # 清理失败不影响任务结果，只记录日志
-                print(f'[GigapixelTask] 清理上传文件失败（非致命）: {e}')
+            # 如果创建了 ASCII 输入复制，清理
+            if input_copy_path:
+                self._safe_rmtree(os.path.dirname(input_copy_path))
 
     def _finalize_outputs(self, task_id, image_id, output_paths, used_settings):
         """
-        将 gigapixel 输出复制到 GIGAPIXEL_OUTPUT_DIR 并生成缩略图。
+        将 gigapixel 输出复制到 GIGAPIXEL_OUTPUT_DIR。
 
         参数：
             task_id: 任务 id
@@ -337,7 +343,7 @@ class GigapixelTaskService:
             used_settings: 实际生效的参数字典
 
         返回：
-            (final_filename, final_local_path, thumbnail_url, thumbnail_path)
+            (final_filename, final_local_path)
         """
         if not output_paths:
             raise ValueError('output_paths 为空')
@@ -362,31 +368,7 @@ class GigapixelTaskService:
 
         # 复制
         shutil.copy2(src_path, final_local_path)
-
-        # 生成缩略图（直接使用 PIL 写到 gigapixel_thumbnails，避免 thumbnail_service 硬编码 URL 前缀）
-        thumbnail_url = ''
-        thumbnail_path = ''
-        try:
-            from PIL import Image, ImageOps
-            with Image.open(final_local_path) as src_img:
-                normalized_img = ImageOps.exif_transpose(src_img)
-                ext = os.path.splitext(final_filename)[1] or '.jpg'
-                thumb_filename = f'{os.path.splitext(final_filename)[0]}_thumb{ext}'
-                thumbnail_path = os.path.join(GIGAPIXEL_THUMBNAILS_DIR, thumb_filename)
-                if not os.path.exists(thumbnail_path):
-                    preview = normalized_img.copy()
-                    # 缩放至长边 512，保留纵横比
-                    preview.thumbnail((512, 512), Image.Resampling.LANCZOS)
-                    save_format = 'JPEG' if ext.lower() in ('.jpg', '.jpeg') else 'PNG'
-                    if save_format == 'JPEG' and preview.mode != 'RGB':
-                        preview = preview.convert('RGB')
-                    save_kwargs = {'optimize': True}
-                    preview.save(thumbnail_path, format=save_format, **save_kwargs)
-                thumbnail_url = f'/api/static/gigapixel_thumbnails/{thumb_filename}'
-        except Exception as e:
-            print(f'[GigapixelTask] Thumbnail generation failed: {e}')
-
-        return final_filename, final_local_path, thumbnail_url, thumbnail_path
+        return final_filename, final_local_path
 
     def _mark_task_failed(self, task_id, reason):
         """
@@ -444,6 +426,21 @@ class GigapixelTaskService:
                 shutil.rmtree(path)
         except Exception as e:
             print(f'[GigapixelTask] Failed to remove temp dir {path}: {e}')
+
+    @staticmethod
+    def _has_only_ascii_path(path):
+        """
+        判断路径是否只包含 ASCII 字符。
+        gigapixel.exe 内部用 ANSI 代码页解析参数，中文等非 ASCII 字符会乱码。
+        如果路径不含非 ASCII 字符，就无需复制。
+        """
+        if not path:
+            return True
+        try:
+            path.encode('ascii')
+            return True
+        except UnicodeEncodeError:
+            return False
 
 
 # 全局服务实例

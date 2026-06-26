@@ -369,13 +369,12 @@
       </template>
     </template>
 
-    <div v-if="previewImage" class="preview-overlay" @click.self="previewImage = null">
-      <div class="preview-modal">
-        <button class="preview-modal__close" @click="previewImage = null">&times;</button>
-        <img class="preview-modal__image" :src="previewImage.url" :alt="previewImage.display_name" />
-        <div class="preview-modal__info">{{ previewImage.display_name }}</div>
-      </div>
-    </div>
+    <ImagePreview
+      :show="!!previewImage"
+      :image="previewImage"
+      :alt="previewImage?.display_name"
+      @close="previewImage = null"
+    />
 
     <div v-if="showRenameItem" class="preview-overlay" @click.self="showRenameItem = null">
       <div class="rename-dialog">
@@ -599,6 +598,8 @@ import {
   compressPublishGroup
 } from '@/services/api'
 import ConfirmDialog from '@/components/common/ConfirmDialog/ConfirmDialog.vue'
+import ImagePreview from '@/components/ImagePreview.vue'
+import { setCustomDragImage } from '@/utils/dragImage'
 
 const images = ref([])
 const loading = ref(true)
@@ -1069,8 +1070,17 @@ function closePublishDateDialog() {
 
 function handlePublishDragStart(item, event) {
   draggingPublishItemId.value = item.id
+  if (!event.dataTransfer) return
   event.dataTransfer.effectAllowed = 'move'
   event.dataTransfer.setData('text/plain', item.id)
+  // 自定义拖拽预览为缩小后的图片缩略图，避免默认整卡片预览遮挡光标
+  // 必须传入卡内已加载完成的 img 元素（DOM 中可见的图），不能传 URL 后异步加载，
+  // 否则 setDragImage 在异步 onload 中调用，浏览器已用默认拖拽图
+  const card = event.currentTarget
+  const img = card && card.querySelector ? card.querySelector('.publishable-card__image') : null
+  if (img) {
+    setCustomDragImage(event.dataTransfer, img)
+  }
 }
 
 function handlePublishDragEnd() {
@@ -1639,6 +1649,7 @@ onMounted(() => {
 <style lang="scss" scoped>
 @import '@/styles/PreparationView.scss';
 
+// 保留 .preview-overlay 以供其他弹窗（重命名、批量等）继续使用，图片预览已统一抽到 ImagePreview 组件
 .preview-overlay {
   position: fixed;
   top: 0;
@@ -1651,49 +1662,6 @@ onMounted(() => {
   justify-content: center;
   z-index: 1000;
   animation: fadeIn 0.2s ease;
-}
-
-.preview-modal {
-  position: relative;
-  max-width: 90vw;
-  max-height: 90vh;
-  display: flex;
-  flex-direction: column;
-  align-items: center;
-  background: $color-bg-card;
-  border-radius: $radius-xl;
-  padding: $spacing-lg;
-  box-shadow: $shadow-xl;
-
-  &__close {
-    position: absolute;
-    top: $spacing-sm;
-    right: $spacing-md;
-    font-size: 28px;
-    color: $color-text-secondary;
-    background: none;
-    border: none;
-    cursor: pointer;
-    line-height: 1;
-    z-index: 1;
-
-    &:hover {
-      color: $color-text-primary;
-    }
-  }
-
-  &__image {
-    max-width: 100%;
-    max-height: 70vh;
-    object-fit: contain;
-    border-radius: $radius-md;
-  }
-
-  &__info {
-    margin-top: $spacing-md;
-    font-size: $font-size-sm;
-    color: $color-text-secondary;
-  }
 }
 
 .rename-dialog,

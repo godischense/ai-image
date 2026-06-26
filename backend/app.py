@@ -4,6 +4,7 @@ import shutil
 from datetime import datetime
 from flask import Flask, request, jsonify, send_from_directory
 from flask_cors import CORS
+from flask_sock import Sock
 from models.config_model import ensure_config_data_ready, get_single_config
 
 # 配置日志格式和级别，确保所有模块的日志都能输出到控制台
@@ -15,6 +16,8 @@ logging.basicConfig(
 
 app = Flask(__name__)
 CORS(app)
+# 创建 flask-sock 实例并挂载到 app
+sock = Sock(app)
 
 ensure_config_data_ready()
 
@@ -28,12 +31,23 @@ IMAGE_MODELS = image_api_config.get('imageModels', [])
 PORT = server_config.get('port', 5678)
 
 fal_api_config = get_single_config('fal_api')
+FAL_BASE_URL = fal_api_config.get('baseUrl', '')
 FAL_API_KEY = fal_api_config.get('apiKey', '')
 FAL_MODELS = fal_api_config.get('falModels', [])
 
 gptsapi_api_config = get_single_config('gptsapi_api')
 GPTSAPI_BASE_URL = gptsapi_api_config.get('baseUrl', 'https://api.gptsapi.net')
 GPTSAPI_API_KEY = gptsapi_api_config.get('apiKey', '')
+
+# 读取 APIYI 配置并同步到 Flask 应用上下文，供 routes/images.py 等业务模块直接读取
+# 字段含义：
+#   APIYI_BASE_URL - APIYI 主域名（默认 https://api.apiyi.com），备选 vip.apiyi.com / b.apiyi.com
+#   APIYI_API_KEY  - API易控制台获取的 Bearer Token
+#   APIYI_IMAGE_MODELS - 可用模型列表（默认 ['gpt-image-2-vip']）
+apiyi_api_config = get_single_config('apiyi_api')
+APIYI_BASE_URL = apiyi_api_config.get('baseUrl', 'https://api.apiyi.com')
+APIYI_API_KEY = apiyi_api_config.get('apiKey', '')
+APIYI_IMAGE_MODELS = apiyi_api_config.get('imageModels', ['gpt-image-2-vip', 'gpt-image-2'])
 
 file_upload_config = get_single_config('file_upload')
 FILE_UPLOAD_BASE_URL = file_upload_config.get('baseUrl', '')
@@ -43,10 +57,14 @@ app.config['IMAGE_API_BASE_URL'] = IMAGE_API_BASE_URL
 app.config['IMAGE_API_KEY'] = IMAGE_API_KEY
 app.config['IMAGE_MODELS'] = IMAGE_MODELS
 app.config['SERVER_PORT'] = PORT
+app.config['FAL_BASE_URL'] = FAL_BASE_URL
 app.config['FAL_API_KEY'] = FAL_API_KEY
 app.config['FAL_MODELS'] = FAL_MODELS
 app.config['GPTSAPI_BASE_URL'] = GPTSAPI_BASE_URL
 app.config['GPTSAPI_API_KEY'] = GPTSAPI_API_KEY
+app.config['APIYI_BASE_URL'] = APIYI_BASE_URL
+app.config['APIYI_API_KEY'] = APIYI_API_KEY
+app.config['APIYI_IMAGE_MODELS'] = APIYI_IMAGE_MODELS
 app.config['FILE_UPLOAD_BASE_URL'] = FILE_UPLOAD_BASE_URL
 app.config['FILE_UPLOAD_API_KEY'] = FILE_UPLOAD_API_KEY
 
@@ -60,8 +78,14 @@ from routes.prompt import prompt_bp
 from routes.image_proxy import image_proxy_bp
 from routes.file_upload import file_upload_bp
 from routes.preparation import preparation_bp
+from routes.geo import geo_bp
 from routes.copy_management import copy_management_bp
+from routes.copy_websocket import copy_websocket_bp, init_sock
 from routes.gigapixel import gigapixel_bp
+from routes.gigapixel_to_preparation import gigapixel_to_preparation_bp
+from routes.user_balance import user_balance_bp
+from routes.apiyi_balance import apiyi_balance_bp
+from routes.prompt_templates import prompt_templates_bp
 
 app.register_blueprint(images_bp)
 app.register_blueprint(config_bp)
@@ -73,8 +97,19 @@ app.register_blueprint(prompt_bp)
 app.register_blueprint(image_proxy_bp)
 app.register_blueprint(file_upload_bp)
 app.register_blueprint(preparation_bp)
+app.register_blueprint(geo_bp)
 app.register_blueprint(copy_management_bp)
+app.register_blueprint(copy_websocket_bp)
+# 初始化协作 WebSocket 路由（必须在 sock 创建之后）
+init_sock(sock)
+from routes.copy_websocket import register_ws_route
+register_ws_route(sock)
 app.register_blueprint(gigapixel_bp)
+app.register_blueprint(gigapixel_to_preparation_bp)
+app.register_blueprint(user_balance_bp)
+app.register_blueprint(apiyi_balance_bp)
+app.register_blueprint(prompt_templates_bp)
+
 
 # 注册静态文件服务，将 generated_images 目录映射为 /api/static/generated_images
 # 项目根目录
@@ -119,6 +154,10 @@ PREPARATION_DIR = os.path.join(project_root, '预备')
 if not os.path.exists(PREPARATION_DIR):
     os.makedirs(PREPARATION_DIR, exist_ok=True)
 
+GEO_DIR = os.path.join(project_root, 'GEO')
+if not os.path.exists(GEO_DIR):
+    os.makedirs(GEO_DIR, exist_ok=True)
+
 # Topaz Gigapixel 输出目录（原图 + 缩略图）
 GIGAPIXEL_OUTPUT_DIR = os.path.join(project_root, 'gigapixel_output')
 if not os.path.exists(GIGAPIXEL_OUTPUT_DIR):
@@ -132,6 +171,14 @@ if not os.path.exists(GIGAPIXEL_THUMBNAILS_DIR):
 GIGAPIXEL_TEMP_ROOT = os.path.join(project_root, 'gigapixel_temp')
 if not os.path.exists(GIGAPIXEL_TEMP_ROOT):
     os.makedirs(GIGAPIXEL_TEMP_ROOT, exist_ok=True)
+
+TEMPLATE_EXAMPLES_DIR = os.path.join(project_root, 'template_examples')
+if not os.path.exists(TEMPLATE_EXAMPLES_DIR):
+    os.makedirs(TEMPLATE_EXAMPLES_DIR, exist_ok=True)
+
+TEMPLATE_EXAMPLE_THUMBNAILS_DIR = os.path.join(project_root, 'template_example_thumbnails')
+if not os.path.exists(TEMPLATE_EXAMPLE_THUMBNAILS_DIR):
+    os.makedirs(TEMPLATE_EXAMPLE_THUMBNAILS_DIR, exist_ok=True)
 
 
 @app.route('/api/static/generated_images/<path:filename>')
@@ -234,6 +281,11 @@ def serve_preparation_image(filename):
     return send_from_directory(PREPARATION_DIR, filename)
 
 
+@app.route('/api/static/geo/<path:filename>')
+def serve_geo_image(filename):
+    return send_from_directory(GEO_DIR, filename)
+
+
 @app.route('/api/static/gigapixel_output/<path:filename>')
 def serve_gigapixel_output(filename):
     """
@@ -254,6 +306,16 @@ def serve_gigapixel_thumbnail(filename):
         将 gigapixel_thumbnails 目录中的缩略图提供给前端访问。
     """
     return send_from_directory(GIGAPIXEL_THUMBNAILS_DIR, filename)
+
+
+@app.route('/api/static/template_examples/<path:filename>')
+def serve_template_example(filename):
+    return send_from_directory(TEMPLATE_EXAMPLES_DIR, filename)
+
+
+@app.route('/api/static/template_example_thumbnails/<path:filename>')
+def serve_template_example_thumbnail(filename):
+    return send_from_directory(TEMPLATE_EXAMPLE_THUMBNAILS_DIR, filename)
 
 
 @app.route('/api/edit-images/save', methods=['POST'])
@@ -286,7 +348,8 @@ def save_edit_result():
             return jsonify({'success': False, 'error': '缺少 image_url 参数'}), 400
 
         from services.edit_asset_service import save_edit_result_directly
-        result = save_edit_result_directly(image_url, prompt, size)
+        from services.auth_service import current_creator
+        result = save_edit_result_directly(image_url, prompt, size, creator=current_creator())
 
         if result.get('success'):
             return jsonify(result), 200
@@ -326,7 +389,7 @@ def save_edit_to_library():
         if not image_url:
             return jsonify({'success': False, 'error': '缺少 image_url 参数'}), 400
 
-        from services.edit_asset_service import save_edit_result_directly, EDIT_FOLDERS_DIR
+        from services.edit_asset_service import save_edit_result_directly, EDIT_FOLDERS_DIR, create_edit_thumbnail_from_local
         from services.folder_service import sanitize_folder_name
 
         # Step 1: 下载到 edit_folders + 生成缩略图
@@ -337,11 +400,18 @@ def save_edit_to_library():
             local_path = os.path.join(EDIT_FOLDERS_DIR, filename)
             if os.path.exists(local_path):
                 result = {'success': True, 'local_path': local_path, 'image_relative_path': filename}
+                # 本地文件已存在但可能缩略图缺失（如之前下载失败），补生成缩略图
+                try:
+                    create_edit_thumbnail_from_local(local_path, '')
+                except Exception as e:
+                    print(f"[SaveEditToLibrary] 补生成编辑缩略图失败: {e}")
             else:
-                result = save_edit_result_directly(image_url, prompt)
+                from services.auth_service import current_creator
+                result = save_edit_result_directly(image_url, prompt, creator=current_creator())
         else:
             # 远程 URL，下载到 edit_folders
-            result = save_edit_result_directly(image_url, prompt)
+            from services.auth_service import current_creator
+            result = save_edit_result_directly(image_url, prompt, creator=current_creator())
 
         if not result.get('success'):
             return jsonify({'success': False, 'error': result.get('error', '下载到 edit_folders 失败')}), 500
@@ -472,6 +542,7 @@ if __name__ == '__main__':
     from services.task_processor import start_task_processor
     from services.background_download_service import start_background_download_service
     from services.gigapixel_task_service import start_gigapixel_task_service
+    from services.copy_presence_service import start_cleanup_thread
     start_task_processor(app, max_retries=600)
     start_background_download_service(app, max_workers=2)
     # 启动 Topaz Gigapixel AI 异步任务服务（并发数从配置读取，默认 1）
@@ -481,4 +552,6 @@ if __name__ == '__main__':
     except Exception:
         _max_parallel = 1
     start_gigapixel_task_service(app, max_workers=_max_parallel)
-    app.run(host='0.0.0.0', port=PORT, debug=True)
+    # 启动文案协作锁的过期清理线程
+    start_cleanup_thread()
+    app.run(host='0.0.0.0', port=PORT, debug=False, use_reloader=False)

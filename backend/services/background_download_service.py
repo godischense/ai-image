@@ -1,3 +1,4 @@
+import os
 import threading
 import queue
 from typing import Optional, Dict, Any
@@ -12,7 +13,6 @@ from models.image_model import (
 
 
 def _resolve_base_dir():
-    import os
     return os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 
@@ -48,6 +48,10 @@ class BackgroundDownloadService:
         self._running = False
         self._task_queue: queue.Queue = queue.Queue()
         self._threads = []
+        # 在飞/在队 image_id 集合：用于防止同一图片被多次入队或并发处理
+        # 实现逻辑：通过 _inflight_lock 保护，enqueue_download 时加入，worker finally 块中移除
+        self._inflight_image_ids: set = set()
+        self._inflight_lock = threading.Lock()
 
     def start(self):
         """
@@ -98,17 +102,44 @@ class BackgroundDownloadService:
                 - image_type (str): 'generation' 或 'edit'
                 - folder_path (str, 可选): 编辑图片的文件夹路径
                 - task_id (str, 可选): 关联的 tasks 表 ID，用于更新 download_error
+
+        实现逻辑：
+            1. 通过 _inflight_lock 检查 image_id 是否已在队列中或正在被处理
+            2. 若已在飞则直接跳过（重复入队），避免重复下载
+            3. 否则加入 _inflight_image_ids 并 put 到队列
         """
         if not self._running:
             print("[BackgroundDownload] Service not running, cannot enqueue task")
-            return
+            return False
+
+        image_id = task.get('image_id')
+        if not image_id:
+            # 没有 image_id 无法去重，按原行为入队（但实际所有调用方都传 image_id）
+            try:
+                self._task_queue.put_nowait(task)
+                print(f"[BackgroundDownload] Enqueued download (no image_id), queue_size={self._task_queue.qsize()}")
+            except queue.Full:
+                print(f"[BackgroundDownload] Queue full, dropping download task")
+            return True
+
+        # 幂等保护：已在飞则跳过入队
+        with self._inflight_lock:
+            if image_id in self._inflight_image_ids:
+                print(f"[BackgroundDownload] Skipped enqueue, image_id={image_id} is already in-flight")
+                return False
+            self._inflight_image_ids.add(image_id)
 
         try:
             self._task_queue.put_nowait(task)
             queue_size = self._task_queue.qsize()
-            print(f"[BackgroundDownload] Enqueued download for image_id={task.get('image_id')}, queue_size={queue_size}")
+            print(f"[BackgroundDownload] Enqueued download for image_id={image_id}, queue_size={queue_size}")
         except queue.Full:
-            print(f"[BackgroundDownload] Queue full, dropping download task for image_id={task.get('image_id')}")
+            # 入队失败：回滚 _inflight_image_ids，避免后续所有同图都进不来
+            with self._inflight_lock:
+                self._inflight_image_ids.discard(image_id)
+            print(f"[BackgroundDownload] Queue full, dropping download task for image_id={image_id}")
+            return False
+        return True
 
     @property
     def queue_size(self) -> int:
@@ -124,6 +155,7 @@ class BackgroundDownloadService:
             2. 在 Flask 应用上下文中执行下载
             3. 任务为 None 时退出循环
             4. 下载异常不中断循环，记录错误后继续处理下一个任务
+            5. finally 块中清理 _inflight_image_ids，防止同图永不入队
         """
         while self._running:
             try:
@@ -134,11 +166,19 @@ class BackgroundDownloadService:
             if task is None:
                 break
 
+            # 提取 image_id 用于 finally 清理
+            current_image_id = task.get('image_id') if isinstance(task, dict) else None
             try:
                 self._process_download_task(task)
             except Exception as e:
                 print(f"[BackgroundDownload] Unexpected error in download worker: {e}")
             finally:
+                # 清理 in-flight 集合：必须在 finally 中保证异常路径也释放
+                # 实现逻辑：worker 处理完后无论成功失败，都从 _inflight_image_ids 中移除
+                # 这样后续同图任务才能再次入队（用于 stale 文件重新下载等场景）
+                if current_image_id:
+                    with self._inflight_lock:
+                        self._inflight_image_ids.discard(current_image_id)
                 self._task_queue.task_done()
 
     def _process_download_task(self, task: Dict[str, Any]):
@@ -147,9 +187,11 @@ class BackgroundDownloadService:
 
         实现逻辑：
             1. 从数据库获取当前图片记录
-            2. 根据 image_type 调用对应的资产准备函数
-            3. 下载成功后更新 images 表
-            4. 下载失败时记录错误到 tasks.data
+            2. 幂等性检查：若 image.local_path 存在且文件真实存在 → 跳过下载
+               （这是防止重复下载的最后一道防线，即使上层 enqueue 重复入队也安全）
+            3. 根据 image_type 调用对应的资产准备函数
+            4. 下载成功后更新 images 表
+            5. 下载失败时记录错误到 tasks.data
         """
         image_id = task.get('image_id')
         image_url = task.get('image_url')
@@ -167,6 +209,14 @@ class BackgroundDownloadService:
                 print(f"[BackgroundDownload] Image {image_id} not found in DB, skipping download")
                 return
 
+            # 幂等保护：DB 中已有 local_path 且文件真实存在 → 视为已下载完成
+            # 实现逻辑：防止 TaskProcessor 重复入队或同 image_id 多个 worker 并发下载
+            # 异常处理：若文件被用户手动删除/磁盘故障导致不存在，正常走下载流程
+            existing_local_path = (getattr(current_image, 'local_path', None) or '').strip()
+            if existing_local_path and os.path.isfile(existing_local_path):
+                print(f"[BackgroundDownload] Image {image_id} already downloaded at {existing_local_path}, skipping")
+                return
+
             print(f"[BackgroundDownload] Starting download for image_id={image_id}, url={image_url[:80]}...")
 
             download_error = ''
@@ -175,10 +225,18 @@ class BackgroundDownloadService:
                     # 编辑图片使用 save_edit_result_directly 保存到 edit_folders 根目录
                     # 并自动生成缩略图到 edit_thumbnails
                     from services.edit_asset_service import save_edit_result_directly
-                    asset_result = save_edit_result_directly(image_url, getattr(current_image, 'prompt', ''))
+                    asset_result = save_edit_result_directly(
+                        image_url,
+                        getattr(current_image, 'prompt', ''),
+                        creator=getattr(current_image, 'creator', '') or ''
+                    )
                 else:
                     from routes.images import prepare_generation_assets
-                    asset_result = prepare_generation_assets(image_url, current_image.local_path)
+                    asset_result = prepare_generation_assets(
+                        image_url,
+                        existing_local_path or None,
+                        creator=getattr(current_image, 'creator', '') or ''
+                    )
 
                 current_image.url = asset_result.get('display_url') or asset_result.get('url') or image_url
                 current_image.thumbnail = asset_result.get('thumbnail', '')
@@ -263,6 +321,12 @@ def enqueue_image_download(
         供 TaskProcessor 等模块调用，将远程图片下载任务提交到后台队列。
         下载完成后自动更新 images 表。
 
+    实现逻辑：
+        1. 入队前先读取 DB 中 image 记录，若 local_path 已存在且文件存在 → 跳过入队
+        2. 服务未启动时走 fallback 同步下载路径，同样做幂等检查
+        3. 正常路径下转发到 BackgroundDownloadService.enqueue_download，
+           由其内部 _inflight_image_ids 集合 + worker 入口 DB 检查完成双重去重
+
     参数：
         image_id: images 表主键
         image_url: 远程图片 URL
@@ -270,15 +334,38 @@ def enqueue_image_download(
         folder_path: 编辑图片的文件夹路径（仅 image_type='edit' 时需要）
         task_id: 关联的 tasks 表 ID（用于记录下载错误）
     """
+    # 入队前幂等检查：DB 中已存在 local_path 且文件存在 → 视为已下载完成
+    # 实现逻辑：减少无意义的入队与日志噪声，作为双重保险
+    # 异常处理：DB 读取失败时不要影响正常入队流程
+    try:
+        existing_image = get_image_by_id(image_id)
+        existing_local_path = (getattr(existing_image, 'local_path', None) or '').strip() if existing_image else ''
+        if existing_local_path and os.path.isfile(existing_local_path):
+            print(f"[BackgroundDownload] Image {image_id} already has local_path, skipping enqueue")
+            return
+    except Exception as check_err:
+        # 幂等检查失败不应该阻断正常入队流程
+        print(f"[BackgroundDownload] Pre-enqueue check failed for image_id={image_id}: {check_err}, proceeding")
+
     if _background_download_service is None:
         print("[BackgroundDownload] Service not initialized, performing sync download...")
         # 兜底：如果服务未启动，fallback 到同步下载
+        # 实现逻辑：fallback 路径同样需要幂等保护
         try:
             from routes.images import prepare_image_assets
-            from models.image_model import get_image_by_id, update_image
+            from models.image_model import update_image
             current_image = get_image_by_id(image_id)
             if current_image:
-                asset_result = prepare_image_assets(image_url, current_image.local_path)
+                # 二次幂等检查：fallback 路径下再次确认文件存在
+                fallback_existing = (getattr(current_image, 'local_path', None) or '').strip()
+                if fallback_existing and os.path.isfile(fallback_existing):
+                    print(f"[BackgroundDownload] Image {image_id} already downloaded at {fallback_existing}, skipping fallback")
+                    return
+                asset_result = prepare_image_assets(
+                    image_url,
+                    current_image.local_path,
+                    creator=getattr(current_image, 'creator', '') or ''
+                )
                 current_image.url = asset_result.get('display_url') or asset_result.get('url') or image_url
                 current_image.thumbnail = asset_result.get('thumbnail', '')
                 current_image.local_path = asset_result.get('local_path')

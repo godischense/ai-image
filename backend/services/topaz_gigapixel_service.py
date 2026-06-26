@@ -8,8 +8,14 @@
 #
 # 实现逻辑：
 #     1. check_available()：校验 exe 文件是否存在，捕获 FileNotFoundError
-#     2. upscale_one()：构造 CLI 参数 -> subprocess.run(shell=True, timeout=600) -> 扫描输出目录
+#     2. upscale_one()：构造 CLI 参数 -> subprocess.run() -> 扫描输出目录
 #     3. 所有异常向上抛 ValueError / RuntimeError，由调用方 (gigapixel_task_service) 写 tasks.fail_reason
+#
+# 关键细节：subprocess 调用方式
+#     - 完整 exe 路径模式：subprocess.run([list, of, args], shell=False)
+#         走 Windows CreateProcessW，原生以 UTF-16 传参，可正确处理中文 / 空格路径
+#     - 系统命令模式 (use_system_command=True)：subprocess.run('chcp 65001 >nul & <cmd>', shell=True)
+#         需要 shell=True 来走 PATH 查找；先切 UTF-8 代码页避免 cmd.exe 把中文路径按 GBK 解析
 #
 # 失败处理（项目规则：失败优先）：
 #     - exe 不存在 -> 抛 ValueError
@@ -23,7 +29,7 @@
 # 用户操作异常考虑：
 #     - 用户配置的 exe 路径不存在/被误删：check_available 预先返回 False，前端展示红字提示
 #     - 用户选择了不存在的输入图：upscale_one 抛 ValueError，UI 提示
-#     - 用户输入路径含中文/空格：自动用引号包裹
+#     - 用户输入路径含中文/空格：list 形式 + CreateProcessW 原生支持，无需手动加引号
 #     - 用户同时提交多张图：每张图调用一次 upscale_one，由 worker 池串行处理
 
 import os
@@ -179,25 +185,31 @@ class TopazGigapixelService:
             raise ValueError(f'scale 必须为 1.0-16.0 之间的数字, 当前: {scale}')
 
         # 6. 拼装命令参数
-        #    使用 'gigapixel' 系统命令时需要 shell=True，
-        #    使用完整路径时可以直接传 list（更安全），但为了和原 ComfyUI 插件保持一致（处理带空格路径），
-        #    这里统一使用字符串 + shell=True
+        #
+        # 关键修复：使用 list 形式传给 subprocess.run（不再用字符串 + shell=True）。
+        # 原因：Windows 默认 cmd.exe 代码页是 GBK (CP936)，
+        # 当命令字符串包含中文路径（如 "ChatGPT Image 2026年6月4日 11_04_26.png"）时，
+        # cmd.exe 会把 UTF-8 字节按 GBK 解码，输出 "锟斤拷" 乱码，
+        # 导致 gigapixel.exe 找不到原图而失败（"Invalid argument ..., but does not exist"）。
+        # list 形式 + shell=False 走 Windows CreateProcessW，原生以 UTF-16 传参，
+        # 正确处理中文 / 空格等 Unicode 字符。
+        #
+        # use_system_command=True 仍需 shell=True（要靠 PATH 查找 gigapixel），
+        # 此时在命令前加 `chcp 65001 >nul & ...` 切换到 UTF-8 代码页解决乱码。
         if self.use_system_command:
             command_exe = 'gigapixel'
         else:
-            command_exe = f'"{self.exe_path}"'
-
-        # 用引号包裹带空格的路径
-        quoted_input = f'"{input_path}"'
-        quoted_output = f'"{output_dir}"'
+            # 完整 exe 路径模式：list 形式 + shell=False，Python subprocess 会自动给含空格的 exe_path 加引号
+            command_exe = self.exe_path
 
         gigapixel_args = [command_exe]
 
         enabled = bool(settings.get('enabled', True))
         if enabled:
             gigapixel_args.extend(['--scale', str(scale_val)])
-            gigapixel_args.extend(['-i', quoted_input])
-            gigapixel_args.extend(['-o', quoted_output])
+            # list 形式不需要手动加引号，subprocess 会自动处理
+            gigapixel_args.extend(['-i', input_path])
+            gigapixel_args.extend(['-o', output_dir])
 
             # 仅在参数 > 0 时才添加（与 ComfyUI 插件完全一致）
             # 兜底值与 ComfyUI-GigapixelAI 节点 GigapixelUpscaleSettings 一致
@@ -230,8 +242,8 @@ class TopazGigapixelService:
             # 关闭详细参数：只传 scale + 输入 + 输出
             gigapixel_args.extend([
                 '--scale', str(scale_val),
-                '-i', quoted_input,
-                '-o', quoted_output
+                '-i', input_path,
+                '-o', output_dir
             ])
 
         # 添加模型参数
@@ -241,23 +253,58 @@ class TopazGigapixelService:
             gigapixel_args.extend(['--mv', '2'])
 
         # 7. 执行 subprocess
-        command_str = ' '.join(gigapixel_args)
-        print(f'[TopazGigapixel] 执行命令: {command_str}')
+        #
+        # 调试日志：仅用于打印，给含空格 / cmd 特殊字符的参数加双引号（展示用，不参与执行）
+        def _quote_for_log(arg):
+            """日志展示用：给含空格或 cmd 特殊字符的参数加双引号。"""
+            if arg is None or arg == '':
+                return '""'
+            special = ' "&|<>^()'
+            if any(c in arg for c in special):
+                return f'"{arg}"'
+            return arg
+
+        log_cmd = ' '.join(_quote_for_log(a) for a in gigapixel_args)
+        print(f'[TopazGigapixel] 执行命令: {log_cmd}')
+
+        def _clip_output(text, limit=700):
+            text = (text or '').strip()
+            if len(text) <= limit:
+                return text
+            return text[:limit] + '...'
 
         try:
-            # Windows 下使用系统命令或带空格的完整路径时需要 shell=True
-            use_shell = self.use_system_command or ' ' in self.exe_path
-            result = subprocess.run(
-                command_str,
-                capture_output=True,
-                text=True,
-                timeout=self.timeout,
-                check=False,
-                shell=use_shell
-            )
-            print(f'[TopazGigapixel] stdout: {result.stdout[:500]}')
+            if self.use_system_command:
+                # PATH 查找需要 shell=True。在命令前加 chcp 65001 切到 UTF-8 代码页，
+                # 避免 cmd.exe 把中文路径按 GBK 解析。
+                # 使用单 & 串接两条命令（& 总是执行；项目规则禁用 &&）
+                cmd_str = f'chcp 65001 >nul & {log_cmd}'
+                result = subprocess.run(
+                    cmd_str,
+                    capture_output=True,
+                    text=True,
+                    timeout=self.timeout,
+                    check=False,
+                    shell=True,
+                    encoding='utf-8',
+                    errors='replace'
+                )
+            else:
+                # 完整路径模式：list 形式 + shell=False，走 Windows CreateProcessW，
+                # 原生以 UTF-16 传参，正确处理中文 / 空格等 Unicode 路径
+                result = subprocess.run(
+                    gigapixel_args,
+                    capture_output=True,
+                    text=True,
+                    timeout=self.timeout,
+                    check=False,
+                    shell=False,
+                    encoding='utf-8',
+                    errors='replace'
+                )
+            print(f'[TopazGigapixel] stdout: {(result.stdout or "")[:500]}')
             if result.stderr:
-                print(f'[TopazGigapixel] stderr: {result.stderr[:500]}')
+                print(f'[TopazGigapixel] stderr: {(result.stderr or "")[:500]}')
 
         except subprocess.TimeoutExpired:
             raise RuntimeError(f'Gigapixel AI 处理超时 (>{self.timeout}秒), 请检查图片或增大 timeout')
@@ -266,6 +313,8 @@ class TopazGigapixelService:
         except Exception as e:
             raise RuntimeError(f'执行 gigapixel 失败: {str(e)[:300]}')
 
+        stdout_excerpt = _clip_output(result.stdout)
+        stderr_excerpt = _clip_output(result.stderr)
         # 8. 校验输出：必须至少有一个图片文件
         try:
             output_files = [
@@ -277,7 +326,21 @@ class TopazGigapixelService:
             raise ValueError(f'读取输出目录失败: {output_dir}, 错误: {e}')
 
         if not output_files:
-            raise ValueError(f'Gigapixel AI 没有生成输出文件, 输出目录: {output_dir}')
+            detail = f'Gigapixel AI did not generate an output file, output_dir: {output_dir}'
+            if stderr_excerpt:
+                detail += f'; stderr: {stderr_excerpt}'
+            if stdout_excerpt:
+                detail += f'; stdout: {stdout_excerpt}'
+            raise ValueError(detail)
+
+        cli_warning = None
+        if result.returncode != 0:
+            cli_warning = f'Gigapixel AI exited with code {result.returncode} after generating output'
+            if stderr_excerpt:
+                cli_warning += f'; stderr: {stderr_excerpt}'
+            if stdout_excerpt:
+                cli_warning += f'; stdout: {stdout_excerpt}'
+            print(f'[TopazGigapixel] warning: {cli_warning[:1000]}')
 
         # 9. 构造返回的 settings dict
         returned_settings = {
@@ -297,6 +360,8 @@ class TopazGigapixelService:
             ),
             'mv': 2 if model_code in MV2_MODELS else None,
             'enabled': enabled,
+            'returncode': result.returncode,
+            'warning': cli_warning,
         }
 
         return (returned_settings, output_files)

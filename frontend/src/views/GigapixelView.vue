@@ -31,7 +31,7 @@
           <div v-if="selectedImage" class="gigapixel-view__selected">
             <div class="gigapixel-view__selected-thumb-wrap">
               <img
-                :src="selectedImage.uploaded_preview_url || selectedImage.thumbnail || selectedImage.url"
+                :src="selectedPreviewUrl"
                 :alt="selectedImage.title || '已选图片'"
                 class="gigapixel-view__selected-thumb"
                 @click="handlePreviewSelected"
@@ -414,6 +414,14 @@
             <div v-if="currentImage?.url" class="gigapixel-view__task-row">
               <span class="gigapixel-view__task-row-label">结果</span>
               <a :href="currentImage.url" target="_blank" class="gigapixel-view__link">查看大图 ↗</a>
+              <button
+                v-if="canCompareCurrentTask"
+                type="button"
+                class="gigapixel-view__link-button"
+                @click="openCurrentCompare"
+              >
+                对比原图
+              </button>
             </div>
           </div>
           <div class="gigapixel-view__task-actions">
@@ -463,6 +471,26 @@
                   {{ basename(task.data.input_path) }}
                 </div>
               </div>
+              <!-- 仅 SUCCESS 状态的任务显示操作按钮 -->
+              <div v-if="task.status === 'SUCCESS'" class="gigapixel-view__task-item-actions">
+                <button
+                  type="button"
+                  class="gigapixel-view__btn gigapixel-view__btn--small"
+                  @click.stop="handleCompareTask(task)"
+                  title="对比放大图和原图"
+                >
+                  对比
+                </button>
+                <button
+                  type="button"
+                  class="gigapixel-view__btn gigapixel-view__btn--small gigapixel-view__btn--prep"
+                  :disabled="!!isCopying[task.id]"
+                  @click.stop="handleCopyToPreparation(task)"
+                  title="将放大结果复制到预备页面"
+                >
+                  {{ isCopying[task.id] ? '⏳ 复制中...' : '→ 预备' }}
+                </button>
+              </div>
             </li>
           </ul>
         </div>
@@ -482,6 +510,15 @@
       v-if="previewImageUrl"
       :image="previewImageObject"
       @close="previewImageUrl = ''"
+    />
+
+    <ImageCompare
+      v-if="compareImage"
+      :new-image="compareImage.new"
+      :original-image="compareImage.original"
+      left-label="放大后"
+      right-label="原图"
+      @close="compareImage = null"
     />
 
     <!-- 确认弹窗 -->
@@ -508,11 +545,13 @@ import {
   submitGigapixelUpscale,
   queryGigapixelTask,
   listGigapixelTasks,
-  cancelGigapixelTask
+  cancelGigapixelTask,
+  copyGigapixelToPreparation
 } from '@/services/api'
 import ImageSelector from '@/components/common/ImageSelector/ImageSelector.vue'
 import ConfirmDialog from '@/components/common/ConfirmDialog/ConfirmDialog.vue'
 import ImagePreview from '@/components/ImagePreview.vue'
+import ImageCompare from '@/components/common/ImageCompare/ImageCompare.vue'
 
 // Topaz Gigapixel 9 个模型选项（与后端 MODEL_MAPPING 一一对应）
 const MODEL_OPTIONS = [
@@ -630,6 +669,7 @@ const uploading = ref(false)
 // 预览
 const previewImageUrl = ref('')
 const previewImageObject = computed(() => previewImageUrl.value ? { url: previewImageUrl.value } : null)
+const compareImage = ref(null)
 
 // 提交参数（默认从 configStore 读取；这里仅作兜底，运行时会被 applyConfigDefaults 覆盖）
 // 重要：与后端 config_model.py 保持一致，且与 ComfyUI 官方节点 GigapixelUpscaleSettings 默认值一致
@@ -656,6 +696,8 @@ let pollingTimer = null
 // 任务历史
 const taskHistory = ref([])
 const loadingHistory = ref(false)
+// 每任务的「→ 预备」按钮独立 loading 状态（key = task.id）
+const isCopying = ref({})
 
 // ConfirmDialog
 const showConfirmDialog = ref(false)
@@ -678,8 +720,29 @@ const libraryImages = computed(() => {
   return Array.isArray(imageStore.images) ? imageStore.images : []
 })
 
+const selectedPreviewUrl = computed(() => {
+  const image = selectedImage.value
+  if (!image) return ''
+  return image.url || image.display_url || image.src || ''
+})
+
 const canSubmit = computed(() => {
   return !submitting.value && available.value && selectedImage.value
+})
+
+const currentOutputUrl = computed(() => {
+  return currentImage.value?.url || currentTask.value?.data?.output_url || ''
+})
+
+const currentOriginalUrl = computed(() => {
+  if (selectedImage.value && currentTask.value?.id && !currentTask.value?.data?.input_url) {
+    return selectedPreviewUrl.value
+  }
+  return currentTask.value?.data?.input_url || selectedPreviewUrl.value || ''
+})
+
+const canCompareCurrentTask = computed(() => {
+  return currentTask.value?.status === 'SUCCESS' && !!currentOutputUrl.value && !!currentOriginalUrl.value
 })
 
 const progressPercent = computed(() => {
@@ -731,8 +794,8 @@ function handleSelectFromLibrary(image) {
 }
 
 function handlePreviewSelected() {
-  if (selectedImage.value?.url) {
-    previewImageUrl.value = selectedImage.value.url
+  if (selectedPreviewUrl.value) {
+    previewImageUrl.value = selectedPreviewUrl.value
   }
 }
 
@@ -805,8 +868,7 @@ async function processUploadFile(file) {
       thumbnail: dataUrl,              // 缩略图同 dataURL
       prompt: file.name,
       title: file.name,
-      local_path: res.uploaded_path,   // 后端落盘后的本地绝对路径（submit 时传这个）
-      uploaded_preview_url: res.preview_url
+      local_path: res.uploaded_path    // 后端落盘后的本地绝对路径（submit 时传这个）
     }
   } catch (e) {
     showConfirm({
@@ -1023,10 +1085,40 @@ function selectTask(task) {
     startPolling(task.id)
   }
   queryGigapixelTask(task.id).then(res => {
-    if (res?.success && res?.image) {
-      currentImage.value = res.image
+    if (res?.success) {
+      if (res.task) currentTask.value = res.task
+      currentImage.value = res.image || null
     }
   })
+}
+
+function openCurrentCompare() {
+  if (!canCompareCurrentTask.value) return
+  compareImage.value = {
+    new: { url: currentOutputUrl.value },
+    original: { url: currentOriginalUrl.value }
+  }
+}
+
+async function handleCompareTask(task) {
+  if (!task?.id) return
+  try {
+    const res = await queryGigapixelTask(task.id)
+    if (res?.success) {
+      currentTask.value = res.task || task
+      currentImage.value = res.image || null
+      openCurrentCompare()
+    }
+  } catch (e) {
+    showConfirm({
+      title: '对比失败',
+      message: e?.message || '无法读取任务原图或放大图',
+      confirmText: '我知道了',
+      cancelText: '关闭',
+      onConfirm: () => { showConfirmDialog.value = false },
+      onCancel: () => { showConfirmDialog.value = false }
+    })
+  }
 }
 
 function handleCancel(taskId) {
@@ -1070,12 +1162,18 @@ function handleCancel(taskId) {
   })
 }
 
+// 加载任务历史
+// 后端会过滤掉失败任务（FAILURE/CANCELLED）和图片不在 gigapixel_output 的任务
+// 返回的 filtered_count 表示被过滤的数量，仅在调试时记录到控制台
 async function loadTaskHistory() {
   loadingHistory.value = true
   try {
     const res = await listGigapixelTasks()
     if (res?.success && Array.isArray(res.tasks)) {
       taskHistory.value = res.tasks
+      if (res.filtered_count) {
+        console.log(`[GigapixelView] 清理了 ${res.filtered_count} 个失效任务`)
+      }
     } else {
       taskHistory.value = []
     }
@@ -1084,6 +1182,60 @@ async function loadTaskHistory() {
     taskHistory.value = []
   } finally {
     loadingHistory.value = false
+  }
+}
+
+// 将 gigapixel 任务的放大结果复制到预备页面
+// 仅 SUCCESS 状态可调用；按钮 disabled 时通过 isCopying 防止重复点击
+// 失败时通过 ConfirmDialog 告知用户（按项目规则不使用 alert）
+async function handleCopyToPreparation(task) {
+  // 防御性校验：仅 SUCCESS 可复制
+  if (!task || task.status !== 'SUCCESS') {
+    showConfirm({
+      title: '任务未完成',
+      message: '只能将已成功的任务复制到预备',
+      confirmText: '我知道了',
+      cancelText: '关闭',
+      onConfirm: () => { showConfirmDialog.value = false },
+      onCancel: () => { showConfirmDialog.value = false }
+    })
+    return
+  }
+
+  // 防止重复点击：标记该任务正在复制
+  isCopying.value = { ...isCopying.value, [task.id]: true }
+  try {
+    const res = await copyGigapixelToPreparation(task.id)
+    if (res?.success) {
+      showConfirm({
+        title: '复制成功',
+        message: res?.message || '已将该放大结果复制到预备页面',
+        confirmText: '我知道了',
+        cancelText: '关闭',
+        onConfirm: () => { showConfirmDialog.value = false },
+        onCancel: () => { showConfirmDialog.value = false }
+      })
+    } else {
+      showConfirm({
+        title: '复制失败',
+        message: res?.error || '未知错误',
+        confirmText: '我知道了',
+        cancelText: '关闭',
+        onConfirm: () => { showConfirmDialog.value = false },
+        onCancel: () => { showConfirmDialog.value = false }
+      })
+    }
+  } catch (e) {
+    showConfirm({
+      title: '复制出错',
+      message: e?.message || '未知错误',
+      confirmText: '我知道了',
+      cancelText: '关闭',
+      onConfirm: () => { showConfirmDialog.value = false },
+      onCancel: () => { showConfirmDialog.value = false }
+    })
+  } finally {
+    isCopying.value = { ...isCopying.value, [task.id]: false }
   }
 }
 

@@ -11,13 +11,21 @@
               </svg>
             </button>
           </div>
+          <div class="image-selector__toolbar">
+            <Select
+              v-model="currentCreatorFilter"
+              :options="creatorFilterOptions"
+              placeholder="全部制作人"
+              wrapper-class="image-selector__creator-select"
+            />
+          </div>
           <div class="image-selector__content">
-            <div v-if="images.length === 0" class="image-selector__empty">
-              暂无图片
+            <div v-if="filteredImages.length === 0" class="image-selector__empty">
+              {{ images.length === 0 ? '暂无图片' : '当前制作人下暂无图片' }}
             </div>
             <div v-else class="image-selector__grid">
               <div
-                v-for="(image, index) in images"
+                v-for="(image, index) in filteredImages"
                 :key="index"
                 :class="['image-selector__item', { 'image-selector__item--selected': selectedIndex === index }]"
                 @click="handleSelect(image, index)"
@@ -38,7 +46,9 @@
 </template>
 
 <script setup>
-import { ref, watch } from 'vue';
+import { computed, ref, watch } from 'vue';
+import Select from '@/components/common/Select/Select.vue';
+import { useConfigStore } from '@/stores/configStore';
 
 const props = defineProps({
   visible: {
@@ -53,11 +63,58 @@ const props = defineProps({
 
 const emit = defineEmits(['update:visible', 'select']);
 
+const configStore = useConfigStore();
 const selectedIndex = ref(-1);
+const currentCreatorFilter = ref('');
+
+const creatorFilterOptions = computed(() => {
+  const list = Array.isArray(configStore.creatorOptions?.options) ? configStore.creatorOptions.options : [];
+  return [
+    { value: '', label: '全部制作人' },
+    ...list.map((name) => ({ value: name, label: name }))
+  ];
+});
+
+const normalizeCreatorFilter = (creator) => {
+  const value = creator === null || creator === undefined ? '' : String(creator);
+  if (!value) return '';
+
+  const optionValues = creatorFilterOptions.value.map((option) => option.value);
+  return optionValues.includes(value) ? value : '';
+};
+
+const filteredImages = computed(() => {
+  const filterValue = currentCreatorFilter.value || '';
+  if (!filterValue) return props.images;
+  return props.images.filter((image) => (image.creator || '') === filterValue);
+});
 
 watch(() => props.visible, (newVal) => {
   if (newVal) {
     selectedIndex.value = -1;
+    currentCreatorFilter.value = normalizeCreatorFilter(configStore.imageLibraryCreatorFilter?.selectedCreator || '');
+  }
+});
+
+watch(currentCreatorFilter, (newValue) => {
+  selectedIndex.value = -1;
+  configStore.setImageLibraryCreatorFilter(newValue || '');
+});
+
+watch(
+  () => configStore.imageLibraryCreatorFilter?.selectedCreator,
+  (newValue) => {
+    const normalized = normalizeCreatorFilter(newValue || '');
+    if (normalized !== currentCreatorFilter.value) {
+      currentCreatorFilter.value = normalized;
+    }
+  }
+);
+
+watch(creatorFilterOptions, () => {
+  const normalized = normalizeCreatorFilter(currentCreatorFilter.value);
+  if (normalized !== currentCreatorFilter.value) {
+    currentCreatorFilter.value = normalized;
   }
 });
 

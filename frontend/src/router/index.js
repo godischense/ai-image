@@ -32,6 +32,11 @@ const routes = [
     component: () => import('../views/PreparationView.vue')
   },
   {
+    path: '/geo',
+    name: 'Geo',
+    component: () => import('../views/GeoView.vue')
+  },
+  {
     path: '/copy-management',
     name: 'CopyManagement',
     component: () => import('../views/CopyManagementView.vue')

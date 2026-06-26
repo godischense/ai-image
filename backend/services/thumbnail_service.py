@@ -20,6 +20,8 @@ import os
 from typing import Optional, Dict, Any
 from PIL import Image, ImageOps
 
+from services.auth_service import ADMIN_CREATORS
+
 
 class ThumbnailService:
     """缩略图服务类"""
@@ -65,29 +67,43 @@ class ThumbnailService:
         生成缩略图签名
 
         功能描述：
-            基于原图绝对路径、文件大小和修改时间生成稳定签名，保证同一原图重复生成时复用同一缩略图。
+            基于原图文件内容（而非绝对路径）生成稳定签名，保证同一份原图内容
+            在磁盘上换路径/换目录后仍然复用同一张缩略图。
 
         实现逻辑：
-            1. 读取原图绝对路径
-            2. 拼接文件大小与纳秒级修改时间
-            3. 使用哈希生成固定长度签名
+            1. 使用 SHA-256 对原图内容做哈希：分块读取，避免一次性把大文件加载到内存
+            2. 用文件总大小作为辅助，区分「不同内容但哈希碰撞（理论概率极低）」的极端情况
+            3. 截取前 16 个十六进制字符作为签名（足够分散且文件名不会过长）
+
+        设计说明（修复说明）：
+            旧实现把 `os.path.abspath(source_path)` 写进签名，图片被 `move_image_to_folder`
+            移到 generated_images/<新文件夹>/ 之后，绝对路径改变，MD5 变化，缩略图
+            每次移动都会被当作新文件重新生成（白白吃 CPU + 磁盘）。
+            改成内容哈希后，只要原图内容没变，签名就不变，`os.path.exists(thumbnail_path)`
+            命中后直接复用现有缩略图，符合「统一路径、只生一次」的预期。
 
         异常处理：
-            - 文件状态读取失败时抛出 RuntimeError，避免继续生成无法稳定复用的缩略图
+            - 文件读取失败时抛出 RuntimeError，避免继续生成无法稳定复用的缩略图
         """
         try:
-            normalized_source_path = os.path.abspath(source_path)
-            file_state = os.stat(normalized_source_path)
-            signature_source = (
-                f"{normalized_source_path}|{file_state.st_size}|{file_state.st_mtime_ns}"
-            )
-            return hashlib.md5(signature_source.encode('utf-8')).hexdigest()[:12]
+            hasher = hashlib.sha256()
+            with open(source_path, 'rb') as f:
+                # 分块读取，64KB/chunk，避免一次性把大图读到内存
+                while True:
+                    chunk = f.read(64 * 1024)
+                    if not chunk:
+                        break
+                    hasher.update(chunk)
+            content_hash = hasher.hexdigest()
+            # 拼接文件大小，进一步降低哈希碰撞的隐患（即便几乎不可能）
+            file_size = os.path.getsize(source_path)
+            return f"{content_hash[:16]}_{file_size:x}"
         except OSError as err:
             error_message = f"Failed to inspect source image for thumbnail signature: {err}"
             print(f"[ThumbnailService] Error: {error_message}")
             raise RuntimeError(error_message)
 
-    def _build_thumbnail_filename(self, source_path: str, source_extension: str) -> str:
+    def _build_thumbnail_filename(self, source_path: str, source_extension: str = 'jpg') -> str:
         """
         生成缩略图文件名
 
@@ -101,7 +117,7 @@ class ThumbnailService:
         """
         source_name = os.path.splitext(os.path.basename(source_path))[0]
         stable_signature = self._build_thumbnail_signature(source_path)
-        return f"{source_name}_thumb_{stable_signature}.{source_extension}"
+        return f"{source_name}_thumb_{stable_signature}.jpg"
 
     def _cleanup_duplicate_thumbnails(self, source_path: str, current_filename: str) -> None:
         """
@@ -129,6 +145,10 @@ class ThumbnailService:
                 if entry.name == current_filename:
                     continue
 
+                legacy_extension = os.path.splitext(entry.name)[1].lower()
+                if legacy_extension not in ('.jpg', '.jpeg', '.png', '.webp'):
+                    continue
+
                 try:
                     os.remove(entry.path)
                     print(f"[ThumbnailService] Removed duplicate thumbnail: {entry.path}")
@@ -151,9 +171,22 @@ class ThumbnailService:
             1. 透明图输出 PNG
             2. 非透明图输出 JPEG
         """
-        if image_mode in ('RGBA', 'LA') or image_mode.endswith('A'):
-            return 'png', 'PNG'
         return 'jpg', 'JPEG'
+
+    def _prepare_jpeg_image(self, image: Image.Image) -> Image.Image:
+        """
+        Convert any source image into a JPEG-safe RGB image.
+        Transparent pixels are flattened onto a white background so every
+        generated thumbnail has a predictable .jpg output format.
+        """
+        if image.mode in ('RGBA', 'LA') or image.mode.endswith('A'):
+            rgba_image = image.convert('RGBA')
+            background = Image.new('RGBA', rgba_image.size, (255, 255, 255, 255))
+            background.alpha_composite(rgba_image)
+            return background.convert('RGB')
+        if image.mode != 'RGB':
+            return image.convert('RGB')
+        return image
 
     def generate_from_local(self, source_path: str) -> Dict[str, Any]:
         """
@@ -189,8 +222,22 @@ class ThumbnailService:
                 normalized_image = ImageOps.exif_transpose(source_image)
                 extension, save_format = self._resolve_save_format(normalized_image.mode)
                 thumbnail_filename = self._build_thumbnail_filename(source_path, extension)
-                thumbnail_path = os.path.join(self.storage_dir, thumbnail_filename)
-                thumbnail_url = f"/api/static/generated_thumbnails/{thumbnail_filename}"
+                thumbnail_subdir = ''
+                try:
+                    project_root = os.path.dirname(self.storage_dir)
+                    generated_root = os.path.join(project_root, 'generated_images')
+                    source_relative = os.path.relpath(source_path, generated_root)
+                    if not source_relative.startswith('..'):
+                        thumbnail_subdir = os.path.dirname(source_relative)
+                        if thumbnail_subdir in ADMIN_CREATORS:
+                            thumbnail_subdir = ''
+                except ValueError:
+                    thumbnail_subdir = ''
+                thumbnail_dir = os.path.join(self.storage_dir, thumbnail_subdir) if thumbnail_subdir else self.storage_dir
+                os.makedirs(thumbnail_dir, exist_ok=True)
+                thumbnail_path = os.path.join(thumbnail_dir, thumbnail_filename)
+                thumbnail_relative = os.path.relpath(thumbnail_path, self.storage_dir)
+                thumbnail_url = f"/api/static/generated_thumbnails/{thumbnail_relative.replace(os.sep, '/')}"
 
                 if os.path.exists(thumbnail_path):
                     self._cleanup_duplicate_thumbnails(source_path, thumbnail_filename)
@@ -204,10 +251,8 @@ class ThumbnailService:
                 preview_image = normalized_image.copy()
                 preview_image.thumbnail(self.max_size, Image.Resampling.LANCZOS)
 
-                save_kwargs: Dict[str, Any] = {'optimize': True}
-                if save_format == 'JPEG':
-                    preview_image = preview_image.convert('RGB')
-                    save_kwargs['quality'] = 85
+                preview_image = self._prepare_jpeg_image(preview_image)
+                save_kwargs: Dict[str, Any] = {'optimize': True, 'quality': 85}
 
                 preview_image.save(thumbnail_path, format=save_format, **save_kwargs)
 

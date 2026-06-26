@@ -17,6 +17,7 @@ copy_management_bp = Blueprint('copy_management', __name__)
 
 # 导入服务
 from services.copy_service import (
+    confirm_upload_copy_html,
     create_copy_board,
     delete_copy_board,
     list_copy_files,
@@ -26,7 +27,10 @@ from services.copy_service import (
     save_country_note,
     save_copy_board,
     save_copy_html,
+    upload_copy_html,
 )
+# 协作锁服务：用于校验保存请求的 token，避免过期/被抢占的客户端继续保存
+from services import copy_presence_service
 
 
 @copy_management_bp.route('/api/copy/files', methods=['GET'])
@@ -114,6 +118,8 @@ def save_copy_content():
         data = request.get_json(silent=True) or {}
         relative_path = (data.get('path') or '').strip()
         content = data.get('content')
+        # 接收客户端传来的文件锁 token；用于协作场景下校验是否仍是合法编辑者
+        owner_token = (data.get('token') or '').strip() or None
 
         if not relative_path:
             return jsonify({'success': False, 'error': '缺少path参数'}), 400
@@ -121,9 +127,24 @@ def save_copy_content():
         if not isinstance(content, str):
             return jsonify({'success': False, 'error': '缺少content参数'}), 400
 
+        # 协作 token 校验：失败直接 403 拒绝写入，避免过期/被抢占的编辑覆盖现有内容
+        if owner_token is not None and not copy_presence_service.verify_save_token(relative_path, owner_token):
+            return jsonify({
+                'success': False,
+                'error': '您的编辑会话已过期（文件锁已被释放/被抢占），请重新打开文件后再保存',
+                'code': 'LOCK_EXPIRED'
+            }), 403
+
         result = save_copy_html(relative_path, content)
 
         if result.get('success'):
+            # 保存成功 → 广播完整内容给其他订阅者（只读用户可实时看到更新）
+            copy_presence_service.broadcast(relative_path, {
+                'type': 'content_update',
+                'file_key': relative_path,
+                'content': content,
+                'by_token': owner_token or ''
+            })
             return jsonify(result)
         else:
             return jsonify({'success': False, 'error': result.get('error', '保存文件失败')}), 400
@@ -176,9 +197,19 @@ def save_copy_board_content():
         data = request.get_json(silent=True) or {}
         relative_path = (data.get('path') or '').strip()
         cards = data.get('cards')
+        # 接收客户端传来的文件锁 token；用于协作场景下校验是否仍是合法编辑者
+        owner_token = (data.get('token') or '').strip() or None
 
         if not relative_path:
             return jsonify({'success': False, 'error': '缺少path参数'}), 400
+
+        # 协作 token 校验：失败直接 403 拒绝写入，避免过期/被抢占的编辑覆盖现有内容
+        if owner_token is not None and not copy_presence_service.verify_save_token(relative_path, owner_token):
+            return jsonify({
+                'success': False,
+                'error': '您的编辑会话已过期（文件锁已被释放/被抢占），请重新打开文件后再保存',
+                'code': 'LOCK_EXPIRED'
+            }), 403
 
         result = save_copy_board(relative_path, cards)
         if result.get('success'):
@@ -227,4 +258,78 @@ def rename_copy_board_file():
 
     except Exception as e:
         print(f"[CopyManagement] rename_copy_board_file error: {e}")
+        return jsonify({'success': False, 'error': str(e)}), 500
+
+
+# 上传HTML文案文件
+# 功能描述：
+#     接收前端上传的HTML文件，自动从文件名中提取国家名称，
+#     保存到对应国家文件夹下（文件夹不存在则自动创建）。
+@copy_management_bp.route('/api/copy/upload-html', methods=['POST'])
+def upload_copy_html_file():
+    try:
+        if 'file' not in request.files:
+            return jsonify({'success': False, 'error': '缺少file参数'}), 400
+
+        file = request.files['file']
+        if not file or not file.filename:
+            return jsonify({'success': False, 'error': '未选择文件'}), 400
+
+        result = upload_copy_html(file, file.filename)
+        if result.get('success'):
+            return jsonify(result)
+        return jsonify({'success': False, 'error': result.get('error', '上传失败')}), 400
+
+    except Exception as e:
+        print(f"[CopyManagement] upload_copy_html_file error: {e}")
+        return jsonify({'success': False, 'error': str(e)}), 500
+
+
+# 确认覆盖上传HTML文件
+# 功能描述：
+#     当上传的HTML文件已存在时，前端确认覆盖后调用此接口，
+#     将文件内容写入覆盖已有文件。
+@copy_management_bp.route('/api/copy/upload-html-confirm', methods=['POST'])
+def confirm_upload_copy_html_file():
+    try:
+        if 'file' not in request.files:
+            return jsonify({'success': False, 'error': '缺少file参数'}), 400
+
+        file = request.files['file']
+        if not file or not file.filename:
+            return jsonify({'success': False, 'error': '未选择文件'}), 400
+
+        data = request.form or {}
+        country = (data.get('country') or '').strip()
+
+        if not country:
+            return jsonify({'success': False, 'error': '缺少country参数'}), 400
+
+        result = confirm_upload_copy_html(file.filename, country)
+        if not result.get('success'):
+            return jsonify({'success': False, 'error': result.get('error', '确认覆盖失败')}), 400
+
+        safe_country = result['country']
+        import os as _os
+        from services.copy_service import COPY_DIR
+        country_dir = _os.path.join(COPY_DIR, safe_country)
+        target_path = _os.path.join(country_dir, _os.path.basename(file.filename))
+        file.save(target_path)
+
+        from datetime import datetime
+        file_info = {
+            'name': _os.path.basename(file.filename),
+            'relative_path': f'{safe_country}/{_os.path.basename(file.filename)}',
+            'modified_at': datetime.fromtimestamp(_os.path.getmtime(target_path)).isoformat(),
+            'type': 'html'
+        }
+        return jsonify({
+            'success': True,
+            'file': file_info,
+            'country': safe_country,
+            'message': '文件已覆盖上传'
+        })
+
+    except Exception as e:
+        print(f"[CopyManagement] confirm_upload_copy_html_file error: {e}")
         return jsonify({'success': False, 'error': str(e)}), 500

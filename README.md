@@ -63,6 +63,7 @@ AI-image/
 │   ├── vite.config.js
 │   ├── package.json
 │   └── package-lock.json
+├── 安装本地环境.bat            # 安装本地 Python 环境和前端依赖（Windows）
 ├── 启动.bat                    # 一键启动脚本（Windows）
 ├── README.md                   # 本文件
 ├── .gitignore                  # Git 忽略规则
@@ -76,7 +77,7 @@ AI-image/
 
 ### 前置依赖 / Prerequisites
 
-- **Python 3.12+** （推荐使用 venv 或 conda）
+- **Python 3.12+**（用于首次创建本地 `env/`）
 - **Node.js 18+** 与 **npm 9+**
 - **Windows 10/11**（项目为 Windows 优化，其他系统可能需要小调整）
 - **可选：Topaz Gigapixel AI ≥ 7.3.0**（商业授权，本地安装）— 启用「图片放大」功能时需要；可在 https://www.topazlabs.com/downloads 下载
@@ -88,129 +89,122 @@ git clone https://github.com/godischense/ai-image.git
 cd ai-image
 ```
 
-### 2. 后端启动 / Backend Setup
+### 2. 安装本地嵌入式环境和依赖 / Install Local Environment
 
-```bash
-# 进入后端目录
-cd backend
+项目优先使用根目录下的本地 Python 环境 `env\python.exe`。`env/`、`frontend/node_modules/` 等目录不会提交到 GitHub，克隆后按下面步骤在本机重建。
 
-# 创建虚拟环境（推荐）
-python -m venv venv
-# Windows
-venv\Scripts\activate
-# Linux/macOS
-source venv/bin/activate
+Windows 推荐直接运行：
 
-# 安装依赖
-pip install -r requirements.txt
-
-# 复制配置文件模板并填写真实配置
-copy config\image_api.json.example config\image_api.json
-copy config\fal_api.json.example config\fal_api.json
-copy config\gptsapi_api.json.example config\gptsapi_api.json
-copy config\file_upload.json.example config\file_upload.json
-copy config\server.json.example config\server.json
-
-# 启动后端
-python app.py
+```bat
+安装本地环境.bat
 ```
 
-后端默认监听 `http://localhost:5678`。
+脚本会执行：
 
-#### 🔬 使用 Conda 创建 Python 环境 / Using Conda
+- 如果 `env\python.exe` 不存在，使用 `py -3.12 -m venv env` 创建本地 Python 环境
+- 使用 `env\python.exe -m pip install -r backend\requirements.txt` 安装后端依赖
+- 优先使用项目本地 `node-v24.15.0-win-x64\npm.cmd`，不存在时回退到系统 `npm`
+- 在 `frontend/` 下执行 `npm install`
 
-如果你的系统中已安装 [Anaconda](https://www.anaconda.com/) 或 [Miniconda](https://docs.conda.io/en/latest/miniconda.html)，推荐使用 Conda 隔离项目依赖，避免污染全局 Python。
+也可以手动执行：
 
-```bash
-# 1. 创建指定版本的 Conda 虚拟环境（Python 3.12，与本项目嵌入式 env 同版本）
-conda create -n ai-image python=3.12 -y
+```powershell
+# 在项目根目录执行
+py -3.12 -m venv env
+.\env\python.exe -m pip install --upgrade pip
+.\env\python.exe -m pip install -r .\backend\requirements.txt
 
-# 2. 激活环境
-# Windows (cmd / PowerShell)
-conda activate ai-image
-# Linux / macOS (bash / zsh)
-conda activate ai-image
-
-# 3. 升级 pip（conda 环境的 pip 版本可能偏旧）
-python -m pip install --upgrade pip
-
-# 4. 进入后端目录
-cd backend
-
-# 5. 安装项目依赖
-pip install -r requirements.txt
-
-# 6. 复制配置文件模板并填写真实配置
-# Windows
-copy config\image_api.json.example config\image_api.json
-copy config\fal_api.json.example config\fal_api.json
-copy config\gptsapi_api.json.example config\gptsapi_api.json
-copy config\file_upload.json.example config\file_upload.json
-copy config\server.json.example config\server.json
-# Linux / macOS
-cp config/image_api.json.example config/image_api.json
-cp config/fal_api.json.example config/fal_api.json
-cp config/gptsapi_api.json.example config/gptsapi_api.json
-cp config/file_upload.json.example config/file_upload.json
-cp config/server.json.example config/server.json
-
-# 7. 启动后端
-python app.py
-```
-
-**常用 Conda 命令速查 / Useful Conda Commands**
-
-| 操作 | 命令 |
-|------|------|
-| 查看所有环境 | `conda env list` |
-| 激活环境 | `conda activate ai-image` |
-| 退出当前环境 | `conda deactivate` |
-| 查看已安装包 | `conda list` |
-| 导出环境配置 | `conda env export > environment.yml` |
-| 从 yml 创建环境 | `conda env create -f environment.yml` |
-| 删除环境 | `conda env remove -n ai-image` |
-
-**遇到问题？/ Troubleshooting**
-
-- **Q: 激活时报 `CondaError: Run 'conda init' before 'conda activate'`**
-  - A: 先执行 `conda init powershell`（或 `conda init bash`），然后**重启终端**生效
-- **Q: pip 安装包时很慢**
-  - A: 切换国内镜像源：
-    ```bash
-    pip config set global.index-url https://pypi.tuna.tsinghua.edu.cn/simple
-    ```
-- **Q: 启动后端报 `ModuleNotFoundError: No module named 'flask'`**
-  - A: 确认终端前缀是 `(ai-image)`，且 `pip install -r requirements.txt` 已执行完成
-- **Q: 想把 Conda 环境也提交到仓库供协作者使用**
-  - A: 不推荐（环境体积大且与平台相关）。可改用 `requirements.txt` + 上述步骤重建
-
-### 3. 前端启动 / Frontend Setup
-
-```bash
-# 新开一个终端
 cd frontend
-
-# 安装依赖
 npm install
+```
 
-# 开发模式启动
+### 3. 配置后端 / Backend Config
+
+复制配置文件模板并填写真实配置：
+
+```bat
+cd backend
+copy config\image_api.json.example config\image_api.json
+copy config\fal_api.json.example config\fal_api.json
+copy config\gptsapi_api.json.example config\gptsapi_api.json
+copy config\apiyi_api.json.example config\apiyi_api.json
+copy config\file_upload.json.example config\file_upload.json
+copy config\server.json.example config\server.json
+```
+
+真实配置文件包含 API Key，不要提交到 Git。
+
+### 4. 启动 / Start
+
+生产模式：
+
+```bat
+启动.bat
+```
+
+`启动.bat` 会使用 `env\python.exe` 启动后端，并打开 `http://localhost:5678`。如果提示缺少 `www\index.html`，先执行前端构建：
+
+```powershell
+cd frontend
+npm run build
+```
+
+开发模式需要分别启动后端和前端：
+
+```powershell
+# 终端 1：后端
+cd backend
+..\env\python.exe app.py
+```
+
+```powershell
+# 终端 2：前端
+cd frontend
 npm run dev
 ```
 
-前端开发服务器默认监听 `http://localhost:3000`，API 请求自动代理到 `http://localhost:5678`。
+后端默认监听 `http://localhost:5678`。前端开发服务器默认监听 `http://localhost:3000`，API 请求自动代理到 `http://localhost:5678`。
 
-### 4. 生产构建 / Production Build
+### 5. 上传到 GitHub / Publish to GitHub
+
+仓库已配置远程地址：
 
 ```bash
-# 在 frontend 目录下
+git remote -v
+```
+
+首次或后续上传：
+
+```bash
+git status
+git add README.md .gitignore 安装本地环境.bat 启动.bat backend frontend ComfyUI-GigapixelAI AIbanner.svg
+git commit -m "docs: add local environment setup instructions"
+git push origin main
+```
+
+上传前确认 `.gitignore` 已排除以下内容：
+
+- `env/`
+- `frontend/node_modules/`
+- `node-v24.15.0-win-x64/`
+- `www/`
+- `backend/storage/`
+- `logs/`
+- `generated_images/`、`generated_thumbnails/`
+- `edit_folders/`、`edit_thumbnails/`
+- `gigapixel_output/`、`gigapixel_sources/`、`gigapixel_temp/`
+- `素材/`、`素材缩略图/`、`预备/`、`回收站/`
+
+这些都是本地环境、运行产物、业务数据或敏感配置，不应该入仓。
+
+### 6. 生产构建 / Production Build
+
+```bash
+cd frontend
 npm run build
 ```
 
 构建产物输出到 `../www/` 目录，可由后端 Flask 直接托管（访问 `http://localhost:5678`）。
-
-### 5. 一键启动（Windows）
-
-直接双击项目根目录的 `启动.bat`，自动启动后端并打开浏览器。
 
 ---
 
@@ -223,6 +217,7 @@ npm run build
 | `image_api.json` | 主图像生成 API（OpenAI 兼容） |
 | `fal_api.json` | fal.ai 模型配置 |
 | `gptsapi_api.json` | GPTsAPI 备用接口 |
+| `apiyi_api.json` | API易接口配置 |
 | `file_upload.json` | 文件上传服务配置 |
 | `server.json` | 后端服务端口（默认 5678） |
 

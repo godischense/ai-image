@@ -50,6 +50,17 @@ function normalizeConfigPayload(payload = {}) {
     if (Array.isArray(rawConfig.imageApi?.imageModels) && rawConfig.imageApi.imageModels.length > 0) {
       result.imageApi.imageModels = rawConfig.imageApi.imageModels;
     }
+    // T8 余额查询字段透传：与 imageApi.baseUrl 共用 Base URL
+    // 余额字段名（quota）和换算除数（500000）已硬编码在后端，不暴露给用户
+    if (rawConfig.imageApi?.balanceToken !== undefined) {
+      result.imageApi.balanceToken = rawConfig.imageApi.balanceToken;
+    }
+    if (rawConfig.imageApi?.balanceUserId !== undefined) {
+      result.imageApi.balanceUserId = rawConfig.imageApi.balanceUserId;
+    }
+    if (rawConfig.imageApi?.balanceRefreshIntervalMinutes !== undefined) {
+      result.imageApi.balanceRefreshIntervalMinutes = rawConfig.imageApi.balanceRefreshIntervalMinutes;
+    }
   }
 
 
@@ -64,8 +75,15 @@ function normalizeConfigPayload(payload = {}) {
     result.promptOptimize = normalizeSection(rawConfig.promptOptimize);
   }
 
+  if ('promptTransform' in rawConfig) {
+    result.promptTransform = normalizeSection(rawConfig.promptTransform);
+  }
+
   if ('falApi' in rawConfig) {
     result.falApi = normalizeSection(rawConfig.falApi);
+    if (rawConfig.falApi?.baseUrl !== undefined) {
+      result.falApi.baseUrl = rawConfig.falApi.baseUrl;
+    }
     if (rawConfig.falApi?.apiKey !== undefined) {
       result.falApi.apiKey = rawConfig.falApi.apiKey;
     }
@@ -81,6 +99,25 @@ function normalizeConfigPayload(payload = {}) {
     }
     if (rawConfig.gptsapiApi?.apiKey !== undefined) {
       result.gptsapiApi.apiKey = rawConfig.gptsapiApi.apiKey;
+    }
+  }
+
+  // APIYI 端口配置：baseUrl + apiKey + imageModels 三字段透传
+  // 缺失这一项时 configStore.saveConfig({ apiyiApi: {...} }) 的 payload 会被归一化成空对象，
+  // 后端 POST /api/config 永远收不到 apiyiApi，数据库永远写不进去
+  if ('apiyiApi' in rawConfig) {
+    result.apiyiApi = normalizeSection(rawConfig.apiyiApi);
+    if (rawConfig.apiyiApi?.baseUrl !== undefined) {
+      result.apiyiApi.baseUrl = rawConfig.apiyiApi.baseUrl;
+    }
+    if (rawConfig.apiyiApi?.apiKey !== undefined) {
+      result.apiyiApi.apiKey = rawConfig.apiyiApi.apiKey;
+    }
+    if (Array.isArray(rawConfig.apiyiApi?.imageModels) && rawConfig.apiyiApi.imageModels.length > 0) {
+      result.apiyiApi.imageModels = rawConfig.apiyiApi.imageModels;
+    }
+    if (rawConfig.apiyiApi?.accessToken !== undefined) {
+      result.apiyiApi.accessToken = rawConfig.apiyiApi.accessToken;
     }
   }
 
@@ -118,6 +155,32 @@ function normalizeConfigPayload(payload = {}) {
     result.gigapixelDescVisibility = normalizeSection(rawConfig.gigapixelDescVisibility);
   }
 
+  // 编辑指令预设片段：snippets 数组结构直接透传，不做归一化处理
+  if ('editPromptSnippets' in rawConfig) {
+    result.editPromptSnippets = normalizeSection(rawConfig.editPromptSnippets);
+  }
+
+  // 制作人列表：设置页维护的下拉选项，必须透传到后端 creator_options 配置
+  if ('creatorOptions' in rawConfig) {
+    result.creatorOptions = normalizeSection(rawConfig.creatorOptions);
+    if (Array.isArray(rawConfig.creatorOptions?.options)) {
+      result.creatorOptions.options = rawConfig.creatorOptions.options.map((item) => String(item));
+    }
+  }
+
+  // 图像生成页「制作人」筛选持久化值：与 editPromptSnippets 写法对称
+  // selectedCreator 强制转 String，避免后端收到 null/Number 类型造成解析异常
+  if ('imageLibraryCreatorFilter' in rawConfig) {
+    result.imageLibraryCreatorFilter = normalizeSection(rawConfig.imageLibraryCreatorFilter);
+    if (rawConfig.imageLibraryCreatorFilter?.selectedCreator !== undefined) {
+      const rawValue = rawConfig.imageLibraryCreatorFilter.selectedCreator;
+      result.imageLibraryCreatorFilter.selectedCreator = rawValue === null || rawValue === undefined ? '' : String(rawValue);
+    }
+  }
+
+  // T8 余额字段已合并到 imageApi 中（balanceToken/balanceUserId/balanceRefreshIntervalMinutes），
+  // 不再单独透传 userBalance 块
+
   return result;
 }
 
@@ -135,12 +198,16 @@ export async function generateImage(data) {
 
 export async function editImage(formData, asyncMode = false) {
   const url = asyncMode ? '/api/images/edits?async=true' : '/api/images/edits'
-  return api.post(url, formData, { timeout: 300000 })
+  return api.post(url, formData, { timeout: 600000 })
 }
 
 export async function getImages(params = {}) {
   const response = await api.get('/api/images', { params });
   return response.images || [];
+}
+
+export async function repairThumbnailsToJpg() {
+  return api.post('/api/images/thumbnails/repair-jpg', {});
 }
 
 export async function getImageById(imageId) {
@@ -169,6 +236,13 @@ export async function deleteFolder(folderId) {
 
 export async function getFolderImages(folderId) {
   return api.get(`/api/folders/${folderId}/images`);
+}
+
+// 获取「未分配」虚拟文件夹下的图片列表
+// 对应后端 /api/folders/unassigned/images 接口
+// 返回的字段结构与 getFolderImages 保持一致
+export async function getUnassignedImages() {
+  return api.get('/api/folders/unassigned/images');
 }
 
 export async function moveImageToFolder(imageId, folderPath) {
@@ -282,6 +356,10 @@ export async function optimizePrompt(prompt) {
   return api.post('/api/prompt/optimize', { prompt }, { timeout: 0 });
 }
 
+export async function optimizePromptTransform(prompt, mediaType, systemPromptId = '') {
+  return api.post('/api/prompt/transform-optimize', { prompt, mediaType, systemPromptId }, { timeout: 0 });
+}
+
 // 保存编辑结果到本地（edit_folders）
 export async function saveEditResult(data) {
   return api.post('/api/edit-images/save', data);
@@ -299,6 +377,12 @@ export async function getCopyFiles() {
   return api.get('/api/copy/files');
 }
 
+// 获取所有当前被锁的文件 key 列表（用于侧边栏"正在编辑"徽章展示）
+// 实现逻辑：调用后端 /api/copy/lock/all，返回 { success, locked_files: [...] }
+export async function getLockedFiles() {
+  return api.get('/api/copy/lock/all');
+}
+
 export async function saveCopyCountryNote(country, note) {
   return api.post('/api/copy/country-note', { country, note });
 }
@@ -307,8 +391,9 @@ export async function getCopyContent(path) {
   return api.get('/api/copy/content', { params: { path } });
 }
 
-export async function saveCopyContent(path, content) {
-  return api.post('/api/copy/content', { path, content });
+export async function saveCopyContent(path, content, token) {
+  // 新增 token 形参：用于后端协作锁校验
+  return api.post('/api/copy/content', { path, content, token });
 }
 
 export async function createCopyBoard(country) {
@@ -319,8 +404,9 @@ export async function getCopyBoardContent(path) {
   return api.get('/api/copy/boards/content', { params: { path } });
 }
 
-export async function saveCopyBoardContent(path, cards) {
-  return api.post('/api/copy/boards/content', { path, cards });
+export async function saveCopyBoardContent(path, cards, token) {
+  // 新增 token 形参：用于后端协作锁校验
+  return api.post('/api/copy/boards/content', { path, cards, token });
 }
 
 export async function deleteCopyBoard(path) {
@@ -329,6 +415,20 @@ export async function deleteCopyBoard(path) {
 
 export async function renameCopyBoard(path, name) {
   return api.post('/api/copy/boards/rename', { path, name });
+}
+
+// 上传HTML文案文件
+export async function uploadCopyHtml(formData) {
+  return api.post('/api/copy/upload-html', formData, {
+    headers: { 'Content-Type': 'multipart/form-data' }
+  });
+}
+
+// 确认覆盖上传HTML文件
+export async function confirmUploadCopyHtml(formData) {
+  return api.post('/api/copy/upload-html-confirm', formData, {
+    headers: { 'Content-Type': 'multipart/form-data' }
+  });
 }
 
 // 预备成品图片 API
@@ -387,7 +487,7 @@ export async function checkGigapixelAvailable() {
 }
 
 // 上传本地图片文件到服务器磁盘（multipart/form-data）
-// 返回：{ success, uploaded_path, preview_url, filename }
+// 返回：{ success, uploaded_path, filename }
 export async function uploadGigapixelFile(file) {
   const formData = new FormData()
   formData.append('file', file)
@@ -408,9 +508,14 @@ export async function queryGigapixelTask(taskId) {
   return api.get(`/api/gigapixel/task/${taskId}`);
 }
 
-// 列出所有 gigapixel 任务（可选 status 过滤）
-export async function listGigapixelTasks(status) {
-  return api.get('/api/gigapixel/tasks', { params: status ? { status } : {} });
+// 列出所有 gigapixel 任务
+// status: 可选，按状态过滤
+// cleanupInvalid: 默认 true，自动过滤掉失败任务和图片不在 gigapixel_output 的任务
+export async function listGigapixelTasks(status, cleanupInvalid = true) {
+  const params = {};
+  if (status) params.status = status;
+  if (cleanupInvalid) params.cleanup_invalid = 'true';
+  return api.get('/api/gigapixel/tasks', { params });
 }
 
 // 列出所有已完成的 gigapixel 结果图
@@ -426,4 +531,105 @@ export async function cancelGigapixelTask(taskId) {
 // 查询后台 worker 队列状态
 export async function queryGigapixelQueue() {
   return api.get('/api/gigapixel/queue');
+}
+
+// 将 gigapixel 任务的放大结果复制到预备目录
+// 仅 SUCCESS 状态可调用；返回新建的 preparation item 记录
+export async function copyGigapixelToPreparation(taskId) {
+  return api.post('/api/gigapixel/copy-to-preparation', { task_id: taskId });
+}
+
+// 查询外部平台的用户余额
+// 返回结构：{ status, platformName, displayAmount, amount, message?, raw? }
+// status 取值：'success' | 'error'
+export async function getUserBalance() {
+  return api.get('/api/user/balance');
+}
+
+// 查询 APIYI 平台账户余额
+// 返回结构：{ status, platformName, displayAmount, amount, rawAmount, matchedField, divider, message?, raw? }
+// 与 getUserBalance 的区别：使用 apiyi_api 配置中的 accessToken 字段，而非 user_balance 配置
+// 后端按 e:\AI-image\新建文件夹\apiyi\查询余额.md 文档实现，Authorization 无 Bearer 前缀
+export async function getApiyiBalance() {
+  return api.get('/api/apiyi/balance');
+}
+
+export async function getPromptTemplates() {
+  return api.get('/api/prompt-templates');
+}
+
+export async function createPromptTemplateCategory(data) {
+  return api.post('/api/prompt-templates/categories', data);
+}
+
+export async function updatePromptTemplateCategory(categoryId, data) {
+  return api.put(`/api/prompt-templates/categories/${categoryId}`, data);
+}
+
+export async function deletePromptTemplateCategory(categoryId) {
+  return api.delete(`/api/prompt-templates/categories/${categoryId}`);
+}
+
+export async function createPromptTemplate(data) {
+  return api.post('/api/prompt-templates', data);
+}
+
+export async function updatePromptTemplate(templateId, data) {
+  return api.put(`/api/prompt-templates/${templateId}`, data);
+}
+
+export async function deletePromptTemplate(templateId) {
+  return api.delete(`/api/prompt-templates/${templateId}`);
+}
+
+export async function uploadPromptTemplateExample(templateId, image) {
+  return api.post(`/api/prompt-templates/${templateId}/example-image`, { image }, { timeout: 120000 });
+}
+
+export async function generatePromptTemplateExample(templateId, defaults = {}) {
+  return api.post(`/api/prompt-templates/${templateId}/generate-example`, defaults, { timeout: 90000 });
+}
+
+export async function getGeoList() {
+  return api.get('/api/geo/list');
+}
+
+export async function updateGeoItem(itemId, data) {
+  return api.put(`/api/geo/update/${itemId}`, data);
+}
+
+export async function batchUpdateGeoItems(ids, updates) {
+  return api.post('/api/geo/batch-update', { ids, updates });
+}
+
+export async function renameGeoItem(itemId, newFilename) {
+  return api.put(`/api/geo/rename/${itemId}`, { new_filename: newFilename });
+}
+
+export async function syncGeo() {
+  return api.post('/api/geo/sync');
+}
+
+export async function deleteGeoItem(itemId) {
+  return api.delete(`/api/geo/delete/${itemId}`);
+}
+
+export async function openGeoFolder(itemId) {
+  return api.get(`/api/geo/open-folder/${itemId}`);
+}
+
+export async function getGeoPublishGroups() {
+  return api.get('/api/geo/publish-groups');
+}
+
+export async function createGeoPublishGroup(publishDate) {
+  return api.post('/api/geo/publish-groups', { publish_date: publishDate });
+}
+
+export async function moveGeoPublishGroup(itemId, publishDate) {
+  return api.post('/api/geo/move-publish-group', { item_id: itemId, publish_date: publishDate });
+}
+
+export async function compressGeoPublishGroup(publishDate) {
+  return api.post('/api/geo/compress-publish-group', { publish_date: publishDate }, { timeout: 600000 });
 }

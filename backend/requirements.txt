@@ -1,5 +1,9 @@
 flask
 flask-cors
 requests
+charset-normalizer
 python-dotenv
 Pillow
+flask-sock>=0.7
+wsproto
+blinker

@@ -40,6 +40,14 @@ from services.folder_service import (
     IMAGE_MANAGE_DIR
 )
 
+# 导入未分配虚拟文件夹服务
+from services.unassigned_folder_service import (
+    list_unassigned_images,
+    get_unassigned_folder_meta,
+    UNASSIGNED_FOLDER_ID
+)
+from services.auth_service import current_creator, current_user_is_admin
+
 # ==================== 文件夹相关接口 ====================
 
 @folder_manager_bp.route('/api/folders', methods=['POST'])
@@ -125,14 +133,24 @@ def get_all_folders():
     """
     获取所有文件夹
 
+    功能描述：
+        返回 folders 表中的真实文件夹，并在最前面拼接「未分配」虚拟文件夹
+        「未分配」对应 generated_thumbnails 根目录下的图片，不需要数据库记录
+
     响应：
     {
         "success": true,
         "data": [
             {
+                "id": "unassigned",
+                "name": "未分配",
+                "image_count": 数量,
+                "is_virtual": true,
+                "extra": {}
+            },
+            {
                 "id": "uuid-string",
                 "name": "文件夹名称",
-                "folder_path": "图片管理/文件夹名称",
                 "image_count": 10,
                 "extra": {},
                 "created_at": "2024-01-01T12:00:00"
@@ -141,11 +159,27 @@ def get_all_folders():
     }
     """
     try:
+        # 未分配虚拟文件夹永远位于列表首位
+        # 失败处理：扫描抛错时仍返回空 count 的元数据，避免前端下拉空掉
+        try:
+            unassigned_meta = get_unassigned_folder_meta()
+        except Exception as unassigned_err:
+            print(f"[FolderManager] 获取未分配文件夹元数据失败: {unassigned_err}")
+            unassigned_meta = {
+                'id': UNASSIGNED_FOLDER_ID,
+                'name': '未分配',
+                'image_count': 0,
+                'is_virtual': True,
+                'extra': {}
+            }
+
         conn = get_db_connection()
         cursor = conn.cursor()
 
         # 获取所有文件夹及图片数量（排除已删除图片）
-        cursor.execute('''
+        creator_join_filter = '' if current_user_is_admin() else ' AND i.creator = ?'
+        params = [] if current_user_is_admin() else [current_creator()]
+        cursor.execute(f'''
             SELECT
                 f.id,
                 f.name,
@@ -153,19 +187,20 @@ def get_all_folders():
                 f.created_at,
                 COUNT(CASE WHEN i.is_deleted IS NULL OR i.is_deleted = 0 THEN i.id END) as image_count
             FROM folders f
-            LEFT JOIN images i ON f.id = i.folder_id
+            LEFT JOIN images i ON f.id = i.folder_id{creator_join_filter}
             GROUP BY f.id
             ORDER BY f.created_at DESC
-        ''')
+        ''', params)
 
-        folders = []
+        folders = [unassigned_meta]
         for row in cursor.fetchall():
             folders.append({
                 'id': row['id'],
                 'name': row['name'],
                 'image_count': row['image_count'],
                 'extra': json.loads(row['extra']) if row['extra'] else {},
-                'created_at': row['created_at']
+                'created_at': row['created_at'],
+                'is_virtual': False
             })
 
         conn.close()
@@ -222,7 +257,9 @@ def get_folder_detail(folder_id):
             }), 404
 
         # 获取文件夹中的图片（排除已删除）
-        cursor.execute('''
+        scope_sql = '' if current_user_is_admin() else ' AND creator = ?'
+        params = [folder_id] if current_user_is_admin() else [folder_id, current_creator()]
+        cursor.execute(f'''
             SELECT
                 id, prompt, model, size, quality, aspect_ratio,
                 resolution, output_format, local_url, preview_url,
@@ -230,9 +267,9 @@ def get_folder_detail(folder_id):
                 error_message, extra, created_at,
                 url, thumbnail, local_path, thumbnail_path, image_type
             FROM images
-            WHERE folder_id = ? AND (is_deleted IS NULL OR is_deleted = 0)
+            WHERE folder_id = ? AND (is_deleted IS NULL OR is_deleted = 0){scope_sql}
             ORDER BY created_at DESC
-        ''', (folder_id,))
+        ''', params)
 
         images = []
         for row in cursor.fetchall():
@@ -504,7 +541,7 @@ def delete_folder(folder_id):
 
         return jsonify({
             'success': True,
-            'message': f'文件夹「{folder_name}」已删除，其中的图片已移至全部图片'
+            'message': f'文件夹「{folder_name}」已删除，其中的图片已移至未分配'
         })
 
     except Exception as e:
@@ -625,6 +662,55 @@ def add_image_to_folder(folder_id):
         }), 500
 
 
+@folder_manager_bp.route('/api/folders/unassigned/images', methods=['GET'])
+def get_unassigned_folder_images():
+    """
+    获取「未分配」虚拟文件夹下的图片列表
+
+    功能描述：
+        返回 generated_thumbnails 根目录下的所有图片
+        字段结构与 /api/folders/<folder_id>/images 保持一致，
+        方便前端 ImageLibrary 复用同一套展示逻辑
+
+    实现逻辑：
+        1. 扫描 thumbnails 根目录拿到文件名集合
+        2. 数据库批量匹配已有记录，补全元数据
+        3. 孤儿文件用虚拟对象兜底
+        4. 按 created_at 降序返回
+
+    响应：
+    {
+        "success": true,
+        "data": [
+            {
+                "id": "...",
+                "url": "...",
+                "thumbnail": "...",
+                ...
+            }
+        ]
+    }
+
+    失败处理：
+        - 扫描失败：返回空列表，不抛错
+        - 数据库查询失败：仍返回虚拟记录占位
+    """
+    try:
+        images = list_unassigned_images()
+        return jsonify({
+            'success': True,
+            'data': images
+        })
+    except Exception as e:
+        print(f"[FolderManager] 获取未分配图片失败: {e}")
+        import traceback
+        traceback.print_exc()
+        return jsonify({
+            'success': False,
+            'message': f'获取未分配图片失败: {str(e)}'
+        }), 500
+
+
 @folder_manager_bp.route('/api/folders/<folder_id>/images', methods=['GET'])
 def get_folder_images(folder_id):
     """
@@ -657,13 +743,18 @@ def get_folder_images(folder_id):
             }), 404
 
         # 获取图片列表（排除已删除）
+        # 字段集必须与 serialize_image 输出保持一致，否则前端按文件夹/全部切换时会出现
+        # 字段缺失（典型问题：creator 缺失导致制作人筛选把文件夹内全部图片过滤掉）。
+        # 注意：fail_reason / progress 在 tasks 表，不在 images 表，不能 SELECT。
         cursor.execute('''
             SELECT
                 id, prompt, model, size, quality, aspect_ratio,
                 resolution, output_format, local_url, preview_url,
                 response_url, request_data, response_data, status,
                 error_message, extra, created_at,
-                url, thumbnail, local_path, thumbnail_path, image_type
+                url, thumbnail, local_path, thumbnail_path, image_type,
+                task_id, title, creator, api_source,
+                parent_id, folder_path, updated_at, poster_copy
             FROM images
             WHERE folder_id = ? AND (is_deleted IS NULL OR is_deleted = 0)
             ORDER BY created_at DESC
@@ -693,7 +784,15 @@ def get_folder_images(folder_id):
                 'thumbnail': row['thumbnail'],
                 'local_path': row['local_path'],
                 'thumbnail_path': row['thumbnail_path'],
-                'image_type': row['image_type']
+                'image_type': row['image_type'],
+                'task_id': row['task_id'],
+                'title': row['title'] or '',
+                'creator': row['creator'] or '',
+                'api_source': row['api_source'] or '',
+                'parent_id': row['parent_id'],
+                'folder_path': row['folder_path'] or '',
+                'updated_at': row['updated_at'] or '',
+                'poster_copy': row['poster_copy'] or ''
             })
 
         conn.close()
@@ -806,9 +905,11 @@ def move_image(image_id):
         cursor = conn.cursor()
 
         # 读取图片所有路径相关列
+        scope_sql = '' if current_user_is_admin() else ' AND creator = ?'
+        params = [image_id] if current_user_is_admin() else [image_id, current_creator()]
         cursor.execute(
-            'SELECT id, url, local_path, local_url, folder_id FROM images WHERE id = ?',
-            (image_id,)
+            f'SELECT id, url, local_path, local_url, folder_id FROM images WHERE id = ?{scope_sql}',
+            params
         )
         image = cursor.fetchone()
         if not image:

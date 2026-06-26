@@ -17,6 +17,7 @@ import os
 import uuid
 import shutil
 import re
+import logging
 from datetime import datetime
 from flask import Blueprint, request, jsonify
 from urllib.parse import quote
@@ -25,6 +26,7 @@ from .preparation_assign import assign_person_in_charge
 from services.publish_compression_service import TARGET_PUBLISH_BYTES, compress_image_to_publish_jpeg
 
 preparation_bp = Blueprint('preparation', __name__)
+logger = logging.getLogger(__name__)
 
 # 获取项目根目录和预备目录
 BASE_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
@@ -269,6 +271,8 @@ def serialize_preparation_item(row):
         'publish_code': row['publish_code'],
         'person_in_charge': row_get(row, 'person_in_charge'),
         'poster_copy': row_get(row, 'poster_copy'),
+        # 制作人字段：与 images.creator / geo_items.creator 对称，由生图/编辑链路透传
+        'creator': row_get(row, 'creator', ''),
         'url': preparation_url(relative_path),
         'created_at': row['created_at'],
         'updated_at': row['updated_at']
@@ -465,7 +469,9 @@ def update_preparation_item(item_id):
         update_values = []
         allowed_fields = {
             'display_name', 'platform', 'score', 'copy_text', 'copy_title', 'is_usable',
-            'is_publishable', 'social_copy', 'publish_code', 'person_in_charge', 'poster_copy'
+            'is_publishable', 'social_copy', 'publish_code', 'person_in_charge', 'poster_copy',
+            # 制作人字段加入白名单，允许通过 PUT 接口直接修改
+            'creator'
         }
         publishable_update = update_data.pop('is_publishable', None) if 'is_publishable' in update_data else None
 
@@ -711,7 +717,9 @@ def generate_preparation_social_copy():
     try:
         data = request.get_json(silent=True) or {}
         item_id = (data.get('item_id') or '').strip()
+        logger.info('[Preparation] generate-social-copy request item_id=%s payload_keys=%s', item_id, list(data.keys()))
         if not item_id:
+            logger.warning('[Preparation] generate-social-copy missing item_id')
             return jsonify({'success': False, 'error': 'item_id不能为空'}), 400
 
         conn = get_db_connection()
@@ -720,11 +728,20 @@ def generate_preparation_social_copy():
         row = cursor.fetchone()
         if not row:
             conn.close()
+            logger.warning('[Preparation] generate-social-copy item not found item_id=%s', item_id)
             return jsonify({'success': False, 'error': '记录不存在'}), 404
 
         copy_text = (row_get(row, 'poster_copy') or '').strip()
+        logger.info(
+            '[Preparation] generate-social-copy loaded item_id=%s filename=%s poster_copy_len=%d existing_social_copy_len=%d',
+            item_id,
+            row_get(row, 'filename') or '',
+            len(copy_text),
+            len((row_get(row, 'social_copy') or '').strip()),
+        )
         if not copy_text:
             conn.close()
+            logger.warning('[Preparation] generate-social-copy empty poster_copy item_id=%s', item_id)
             return jsonify({'success': False, 'error': '海报文案为空，无法生成朋友圈文案'}), 400
 
         from services.social_copy_service import generate_social_copy
@@ -732,6 +749,11 @@ def generate_preparation_social_copy():
         result = generate_social_copy(copy_text)
         if not result.get('success'):
             conn.close()
+            logger.warning(
+                '[Preparation] generate-social-copy upstream failed item_id=%s error=%s',
+                item_id,
+                result.get('error') or '生成朋友圈文案失败',
+            )
             return jsonify({'success': False, 'error': result.get('error') or '生成朋友圈文案失败'}), 502
 
         social_copy = result.get('social_copy') or ''
@@ -742,6 +764,12 @@ def generate_preparation_social_copy():
             WHERE id = ?
         ''', (social_copy, now, item_id))
         conn.commit()
+        logger.info(
+            '[Preparation] generate-social-copy saved item_id=%s social_copy_len=%d preview=%s',
+            item_id,
+            len(social_copy),
+            social_copy[:200].replace('\r', '\\r').replace('\n', '\\n'),
+        )
 
         cursor.execute('SELECT * FROM preparation_items WHERE id = ?', (item_id,))
         updated_row = cursor.fetchone()
@@ -753,7 +781,7 @@ def generate_preparation_social_copy():
             'item': serialize_preparation_item(updated_row)
         })
     except Exception as e:
-        print(f"[Preparation] generate-social-copy error: {e}")
+        logger.exception('[Preparation] generate-social-copy exception')
         return jsonify({'success': False, 'error': str(e)}), 500
 
 
@@ -1209,6 +1237,8 @@ def copy_image_to_preparation():
         platform = (data.get('platform') or '').strip()
         copy_text = (data.get('copy_text') or '').strip()
         poster_copy = (data.get('poster_copy') or '').strip()
+        # 制作人字段：从请求体中读取，缺失时退到空字符串
+        creator = (data.get('creator') or '').strip()
 
         if not image_url:
             return jsonify({'success': False, 'error': '图片URL不能为空'}), 400
@@ -1273,10 +1303,10 @@ def copy_image_to_preparation():
         cursor.execute('''
             INSERT INTO preparation_items (
                 id, filename, folder_path, display_name, platform, score, copy_text, copy_title,
-                is_usable, is_publishable, publish_date, social_copy, publish_code, poster_copy, created_at, updated_at
+                is_usable, is_publishable, publish_date, social_copy, publish_code, poster_copy, creator, created_at, updated_at
             )
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-        ''', (item_id, target_filename, '', display_name or name_without_ext, platform, 0, copy_text, '', 0, 0, '', '', '', poster_copy, now, now))
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        ''', (item_id, target_filename, '', display_name or name_without_ext, platform, 0, copy_text, '', 0, 0, '', '', '', poster_copy, creator, now, now))
 
         conn.commit()
 

@@ -6,6 +6,7 @@ from typing import Optional, Dict, Any, List
 
 from models.image_model import (
     get_db_connection,
+    get_image_by_id,
     get_image_by_task_id,
     get_task,
     update_task,
@@ -14,6 +15,34 @@ from models.image_model import (
 )
 from services.image_service import ImageService
 from services.fal_image_service import FalImageService
+
+
+# 判断是否应跳过 enqueue_image_download 调用
+# 功能描述：当 image 已有 local_path 且文件真实存在时，视为已下载完成，
+# 返回 True 让调用方跳过本次 enqueue，减少队列与日志噪声
+# 实现逻辑：调用 get_image_by_id 读取 image 记录，读取 local_path 字段并 strip，
+# local_path 非空且 os.path.isfile 命中则返回 True；任意步骤异常不影响主流程，返回 False
+# 异常处理：DB 读取失败或字段异常时 fail-open，返回 False 让入队继续
+def _should_skip_enqueue(image_id: str) -> bool:
+    """
+    判断是否应跳过 enqueue_image_download 调用
+
+    参数：
+        image_id: images 表主键
+
+    返回：
+        True 表示已下载完成可跳过，False 表示需要继续入队
+    """
+    try:
+        existing = get_image_by_id(image_id)
+        existing_local_path = (getattr(existing, 'local_path', None) or '').strip() if existing else ''
+        if existing_local_path and os.path.isfile(existing_local_path):
+            print(f"[TaskProcessor] Image {image_id} already has local_path, skipping enqueue at caller")
+            return True
+    except Exception as check_err:
+        # 异常处理：DB 读取失败时不要阻断正常入队流程
+        print(f"[TaskProcessor] Pre-enqueue check failed for image_id={image_id}: {check_err}, proceeding")
+    return False
 
 
 class TaskProcessor:
@@ -167,8 +196,12 @@ class TaskProcessor:
         获取所有 pending 状态的任务
 
         实现逻辑：
-            排除 api_source='topaz_gigapixel' 的任务（该来源由 GigapixelTaskService 独立管理，
-            不需要远程轮询）。其它来源（t8/openai/fal/gptsapi/...）继续轮询。
+            排除以下来源的任务，避免 TaskProcessor 用错误的客户端去轮询：
+              1. api_source='topaz_gigapixel' —— 由 GigapixelTaskService 独立管理（本地 CLI 执行）
+              2. api_source='apiyi'           —— APIYI 走的是本地 ThreadPoolExecutor 后台线程，
+                                                状态在 worker 完成后直接写 DB，
+                                                没有可用的远端 poll_url 供 TaskProcessor 轮询
+            其它来源（t8/openai/fal/gptsapi/...）继续轮询。
         """
         conn = get_db_connection()
         cursor = conn.cursor()
@@ -178,8 +211,8 @@ class TaskProcessor:
             cursor.execute(f'''
                 SELECT * FROM tasks
                 WHERE status IN ({placeholders})
-                  AND (api_source IS NULL OR api_source != ?)
-            ''', tuple(PENDING_TASK_STATUSES) + ('topaz_gigapixel',))
+                  AND (api_source IS NULL OR (api_source != ? AND api_source != ?))
+            ''', tuple(PENDING_TASK_STATUSES) + ('topaz_gigapixel', 'apiyi'))
 
             rows = cursor.fetchall()
             result = []
@@ -275,15 +308,17 @@ class TaskProcessor:
                         update_image(current_image)
 
                         # 提交到后台下载队列
+                        # 调用方幂等保护：已下载完成的 image 不再重复入队，减少队列与日志噪声
                         try:
                             from services.background_download_service import enqueue_image_download
-                            enqueue_image_download(
-                                image_id=current_image.id,
-                                image_url=first_url,
-                                image_type=getattr(current_image, 'image_type', 'generation') or 'generation',
-                                folder_path=getattr(current_image, 'folder_path', None),
-                                task_id=task_id
-                            )
+                            if not _should_skip_enqueue(current_image.id):
+                                enqueue_image_download(
+                                    image_id=current_image.id,
+                                    image_url=first_url,
+                                    image_type=getattr(current_image, 'image_type', 'generation') or 'generation',
+                                    folder_path=getattr(current_image, 'folder_path', None),
+                                    task_id=task_id
+                                )
                         except Exception as err:
                             download_error = str(err)
                             print(f"[TaskProcessor] Failed to enqueue download for GPTsAPI task {task_id}: {err}")
@@ -295,6 +330,8 @@ class TaskProcessor:
                             from models.image_model import add_image as add_img_record
                             for idx, extra_url in enumerate(extra_urls):
                                 try:
+                                    # 制作人：从 task.data.creator 透传（生图路由创建任务时已写入），
+                                    # 兜底从 current_image.creator 读取，避免老任务缺少 task_data 字段时丢失
                                     extra_image = add_img_record(
                                         url=extra_url,
                                         thumbnail='',
@@ -304,15 +341,18 @@ class TaskProcessor:
                                         quality=getattr(current_image, 'quality', 'auto'),
                                         task_id=task_id,
                                         image_type=getattr(current_image, 'image_type', 'generation') or 'generation',
-                                        poster_copy=getattr(current_image, 'poster_copy', '') or ''
+                                        poster_copy=getattr(current_image, 'poster_copy', '') or '',
+                                        creator=(task_data.get('creator') or getattr(current_image, 'creator', '') or '')
                                     )
-                                    enqueue_image_download(
-                                        image_id=extra_image.id,
-                                        image_url=extra_url,
-                                        image_type=getattr(current_image, 'image_type', 'generation') or 'generation',
-                                        folder_path=getattr(current_image, 'folder_path', None),
-                                        task_id=task_id
-                                    )
+                                    # 调用方幂等保护：额外图独立判断是否已下载
+                                    if not _should_skip_enqueue(extra_image.id):
+                                        enqueue_image_download(
+                                            image_id=extra_image.id,
+                                            image_url=extra_url,
+                                            image_type=getattr(current_image, 'image_type', 'generation') or 'generation',
+                                            folder_path=getattr(current_image, 'folder_path', None),
+                                            task_id=task_id
+                                        )
                                 except Exception as err:
                                     print(f"[TaskProcessor] Failed to save extra GPTsAPI image {idx+2}: {err}")
                     elif not image_urls:
@@ -328,7 +368,10 @@ class TaskProcessor:
                             'raw_query_result': query_result,
                             'image_url': image_urls[0] if image_urls else '',
                             'download_error': download_error,
-                            'poll_url': poll_url
+                            'poll_url': poll_url,
+                            'size': task_data.get('size', ''),
+                            'aspect_ratio': task_data.get('aspect_ratio', ''),
+                            'resolution': task_data.get('resolution', '')
                         }
                     )
                     print(f"[TaskProcessor] GPTsAPI task {task_id} completed with {len(image_urls)} image(s)")
@@ -355,13 +398,17 @@ class TaskProcessor:
                     print(f"[TaskProcessor] Task {task_id}: fal task missing model in data")
                     return
 
-                # 获取 FAL_API_KEY 配置
+                # 获取 FAL_API_KEY 和 FAL_BASE_URL 配置
                 fal_api_key = self._app.config.get('FAL_API_KEY', '')
                 if not fal_api_key:
                     print(f"[TaskProcessor] Task {task_id}: FAL_API_KEY not configured")
                     return
 
-                fal_service = FalImageService(fal_api_key)
+                # baseUrl 优先从应用配置读取（启动时由 config_model 同步到 app.config），
+                # 不再提供硬编码兜底，缺失时由 FalImageService 构造时抛错
+                fal_base_url = self._app.config.get('FAL_BASE_URL', '')
+
+                fal_service = FalImageService(fal_api_key, base_url=fal_base_url)
 
                 # 查询 fal.ai 任务状态（传入 response_url 优先使用 API 返回的地址）
                 status_result = fal_service.query_task_status(model, task_id, response_url)
@@ -436,15 +483,17 @@ class TaskProcessor:
                             update_image(current_image)
 
                             # 将第一张图片提交到后台下载队列
+                            # 调用方幂等保护：已下载完成的 image 不再重复入队
                             try:
                                 from services.background_download_service import enqueue_image_download
-                                enqueue_image_download(
-                                    image_id=current_image.id,
-                                    image_url=first_url,
-                                    image_type=current_image.image_type or 'generation',
-                                    folder_path=getattr(current_image, 'folder_path', None),
-                                    task_id=task_id
-                                )
+                                if not _should_skip_enqueue(current_image.id):
+                                    enqueue_image_download(
+                                        image_id=current_image.id,
+                                        image_url=first_url,
+                                        image_type=current_image.image_type or 'generation',
+                                        folder_path=getattr(current_image, 'folder_path', None),
+                                        task_id=task_id
+                                    )
                             except Exception as err:
                                 download_error = str(err)
                                 print(f"[TaskProcessor] Failed to enqueue download for fal task {task_id}: {err}")
@@ -457,6 +506,8 @@ class TaskProcessor:
                             for idx, extra_url in enumerate(extra_urls):
                                 try:
                                     # 为额外图片创建独立记录
+                                    # 制作人：从 task.data.creator 透传（生图路由创建任务时已写入），
+                                    # 兜底从 current_image.creator 读取，避免老任务缺少 task_data 字段时丢失
                                     extra_image = add_image(
                                         url=extra_url,
                                         thumbnail='',
@@ -466,16 +517,19 @@ class TaskProcessor:
                                         quality=getattr(current_image, 'quality', 'auto'),
                                         task_id=task_id,
                                         image_type=getattr(current_image, 'image_type', 'generation') or 'generation',
-                                        poster_copy=getattr(current_image, 'poster_copy', '') or ''
+                                        poster_copy=getattr(current_image, 'poster_copy', '') or '',
+                                        creator=(task_data.get('creator') or getattr(current_image, 'creator', '') or '')
                                     )
                                     # 提交到后台下载队列
-                                    enqueue_image_download(
-                                        image_id=extra_image.id,
-                                        image_url=extra_url,
-                                        image_type=getattr(current_image, 'image_type', 'generation') or 'generation',
-                                        folder_path=getattr(current_image, 'folder_path', None),
-                                        task_id=task_id
-                                    )
+                                    # 调用方幂等保护：fal 额外图独立判断是否已下载
+                                    if not _should_skip_enqueue(extra_image.id):
+                                        enqueue_image_download(
+                                            image_id=extra_image.id,
+                                            image_url=extra_url,
+                                            image_type=getattr(current_image, 'image_type', 'generation') or 'generation',
+                                            folder_path=getattr(current_image, 'folder_path', None),
+                                            task_id=task_id
+                                        )
                                     print(f"[TaskProcessor] Fal task {task_id}: extra image {idx+2}/{len(image_urls_list)} saved (id={extra_image.id})")
                                 except Exception as err:
                                     print(f"[TaskProcessor] Failed to save extra image {idx+2} for task {task_id}: {err}")
@@ -574,13 +628,20 @@ class TaskProcessor:
                                     os.path.dirname(os.path.dirname(__file__)),
                                     'generated_images'
                                 )
+                                from services.creator_storage import creator_storage_dir, static_url_for_path
+                                task_creator = task_data.get('creator') or getattr(current_image, 'creator', '') or ''
+                                generated_dir = creator_storage_dir(generated_dir, task_creator)
                                 os.makedirs(generated_dir, exist_ok=True)
                                 local_filepath = os.path.join(generated_dir, filename)
 
                                 with open(local_filepath, 'wb') as f:
                                     f.write(image_data)
 
-                                local_url = f"/api/static/generated_images/{filename}"
+                                generated_root = os.path.join(
+                                    os.path.dirname(os.path.dirname(__file__)),
+                                    'generated_images'
+                                )
+                                local_url = static_url_for_path(local_filepath, generated_root, '/api/static/generated_images')
                                 local_urls.append(local_url)
 
                                 if processed_count == 0:
@@ -596,6 +657,8 @@ class TaskProcessor:
                                         print(f"[TaskProcessor] Failed to create thumbnail for b64 task {task_id}: {thumb_err}")
                                 else:
                                     # 额外图片创建独立记录
+                                    # 制作人：从 task.data.creator 透传（生图路由创建任务时已写入），
+                                    # 兜底从 current_image.creator 读取，避免老任务缺少 task_data 字段时丢失
                                     extra_image = add_img_record(
                                         url=local_url,
                                         thumbnail='',
@@ -606,7 +669,8 @@ class TaskProcessor:
                                         task_id=task_id,
                                         local_path=local_filepath,
                                         image_type=getattr(current_image, 'image_type', 'generation') or 'generation',
-                                        poster_copy=getattr(current_image, 'poster_copy', '') or ''
+                                        poster_copy=getattr(current_image, 'poster_copy', '') or '',
+                                        creator=(task_data.get('creator') or getattr(current_image, 'creator', '') or '')
                                     )
                                     try:
                                         from services.thumbnail_service import create_thumbnail_from_local
@@ -637,15 +701,17 @@ class TaskProcessor:
                         update_image(current_image)
 
                         # 将下载任务提交到后台下载队列
+                        # 调用方幂等保护：已下载完成的 image 不再重复入队
                         try:
                             from services.background_download_service import enqueue_image_download
-                            enqueue_image_download(
-                                image_id=current_image.id,
-                                image_url=image_url,
-                                image_type=current_image.image_type or 'generation',
-                                folder_path=getattr(current_image, 'folder_path', None),
-                                task_id=task_id
-                            )
+                            if not _should_skip_enqueue(current_image.id):
+                                enqueue_image_download(
+                                    image_id=current_image.id,
+                                    image_url=image_url,
+                                    image_type=current_image.image_type or 'generation',
+                                    folder_path=getattr(current_image, 'folder_path', None),
+                                    task_id=task_id
+                                )
                         except Exception as err:
                             download_error = str(err)
                             print(f"[TaskProcessor] Failed to enqueue download for task {task_id}: {err}")
@@ -673,13 +739,15 @@ class TaskProcessor:
                                             image_type=getattr(current_image, 'image_type', 'generation') or 'generation',
                                             poster_copy=getattr(current_image, 'poster_copy', '') or ''
                                         )
-                                        enqueue_image_download(
-                                            image_id=extra_image.id,
-                                            image_url=extra_url,
-                                            image_type=getattr(current_image, 'image_type', 'generation') or 'generation',
-                                            folder_path=getattr(current_image, 'folder_path', None),
-                                            task_id=task_id
-                                        )
+                                        # 调用方幂等保护：T8/OpenAI 额外图独立判断是否已下载
+                                        if not _should_skip_enqueue(extra_image.id):
+                                            enqueue_image_download(
+                                                image_id=extra_image.id,
+                                                image_url=extra_url,
+                                                image_type=getattr(current_image, 'image_type', 'generation') or 'generation',
+                                                folder_path=getattr(current_image, 'folder_path', None),
+                                                task_id=task_id
+                                            )
                                     except Exception as err:
                                         print(f"[TaskProcessor] Failed to save extra image for task {task_id}: {err}")
                     else:

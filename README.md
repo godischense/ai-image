@@ -182,21 +182,6 @@ git commit -m "docs: add local environment setup instructions"
 git push origin main
 ```
 
-上传前确认 `.gitignore` 已排除以下内容：
-
-- `env/`
-- `frontend/node_modules/`
-- `node-v24.15.0-win-x64/`
-- `www/`
-- `backend/storage/`
-- `logs/`
-- `generated_images/`、`generated_thumbnails/`
-- `edit_folders/`、`edit_thumbnails/`
-- `gigapixel_output/`、`gigapixel_sources/`、`gigapixel_temp/`
-- `素材/`、`素材缩略图/`、`预备/`、`回收站/`
-
-这些都是本地环境、运行产物、业务数据或敏感配置，不应该入仓。
-
 ### 6. 生产构建 / Production Build
 
 ```bash

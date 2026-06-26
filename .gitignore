@@ -22,7 +22,6 @@ __pycache__/
 # ---------- 构建产物 ----------
 frontend/dist/
 frontend/vite.config.js.timestamp-*.mjs
-www/
 *.log
 
 # ---------- 运行时数据（业务产出，非源码） ----------
